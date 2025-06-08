@@ -8,7 +8,7 @@
 #define MAX_ENTRIES 10240
 #define COMM_LEN 16
 
-// TLS 数据事件结构 - 保持较小
+// TLS 数据事件结构 - 添加连接信息
 struct tls_data_event {
     __u32 pid;
     __u32 tid;
@@ -17,6 +17,7 @@ struct tls_data_event {
     __u8 is_read;
     __u8 _pad[3];
     char comm[COMM_LEN];
+    __u64 ssl_ptr;  // SSL 结构体指针，用作连接标识
 } __attribute__((packed));
 
 struct {
@@ -117,6 +118,7 @@ int probe_return_ssl_write(struct pt_regs *ctx)
     event->tid = (__u32)pid_tgid;
     event->timestamp = bpf_ktime_get_ns();
     event->is_read = 0;
+    event->ssl_ptr = (__u64)args->ssl;  // 添加SSL指针作为连接标识
     
     // 获取进程名
     bpf_get_current_comm(&event->comm, sizeof(event->comm));
@@ -211,6 +213,7 @@ int probe_return_ssl_read(struct pt_regs *ctx)
     event->tid = (__u32)pid_tgid;
     event->timestamp = bpf_ktime_get_ns();
     event->is_read = 1;   // 这里标记为读取操作
+    event->ssl_ptr = (__u64)args->ssl;  // 添加SSL指针作为连接标识
     
     // 获取进程名
     bpf_get_current_comm(&event->comm, sizeof(event->comm));

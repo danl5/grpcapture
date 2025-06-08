@@ -18,6 +18,8 @@ import (
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/perf"
 	"github.com/cilium/ebpf/rlimit"
+	"github.com/danl5/htrack"
+	"github.com/danl5/htrack/types"
 )
 
 type TLSDataEvent struct {
@@ -27,8 +29,23 @@ type TLSDataEvent struct {
 	DataLen   uint32
 	IsRead    uint8
 	_         [3]byte // padding
-	Data      [16384]byte
 	Comm      [16]byte
+	SSLPtr    uint64 // SSL 结构体指针，用作连接标识
+	Data      [16384]byte
+}
+
+// HTTPSession 表示一个HTTP会话
+type HTTPSession struct {
+	htrack *htrack.HTrack
+}
+
+// httpSessions 存储所有活跃的HTTP会话
+var httpSessions = make(map[string]*HTTPSession)
+
+// initHTTPTracker 初始化HTTP跟踪器
+func initHTTPTracker() *htrack.HTrack {
+	config := htrack.DefaultConfig()
+	return htrack.New(config)
 }
 
 func main() {
@@ -91,6 +108,9 @@ func main() {
 	}
 	defer rd.Close()
 
+	// 初始化 HTTP 解析器
+	initHTTPParser()
+
 	// 信号处理
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
@@ -137,6 +157,11 @@ func findTLSLibraries() []string {
 	return libraries
 }
 
+// 初始化 HTTP 解析器
+func initHTTPParser() {
+	log.Println("HTTP parser initialized")
+}
+
 // 在 main.go 中更新 processEvent 函数
 func processEvent(rd *perf.Reader) error {
 	// 读取事件元数据
@@ -156,9 +181,9 @@ func processEvent(rd *perf.Reader) error {
 		return nil
 	}
 
-	direction := "WRITE"
+	direction := types.DirectionServerToClient
 	if event.IsRead == 1 {
-		direction = "READ"
+		direction = types.DirectionClientToServer
 	}
 
 	commBytes := make([]byte, len(event.Comm))
@@ -166,14 +191,6 @@ func processEvent(rd *perf.Reader) error {
 		commBytes[i] = byte(v)
 	}
 	comm := string(bytes.TrimRight(commBytes, "\x00"))
-	timestamp := time.Unix(0, int64(event.Timestamp))
-
-	fmt.Printf("[%s] PID: %d, Process: %s, %s %d bytes\n",
-		timestamp.Format("15:04:05.000000"),
-		event.Pid,
-		comm,
-		direction,
-		event.DataLen)
 
 	// 如果有数据，读取数据部分
 	if event.DataLen > 0 {
@@ -183,18 +200,80 @@ func processEvent(rd *perf.Reader) error {
 			return nil
 		}
 
-		data := string(dataRecord.RawSample[:min(int(event.DataLen), len(dataRecord.RawSample))])
+		// 获取原始数据
+		rawData := dataRecord.RawSample[:min(int(event.DataLen), len(dataRecord.RawSample))]
+
+		// 创建连接级别的会话ID（基于PID、进程名和SSL指针）
+		sessionID := fmt.Sprintf("%d-%s-%x", event.Pid, comm, event.SslPtr)
+
+		// 使用htrack解析数据
+		req, resp, err := htrack.ProcessHTTPPacket(sessionID, rawData, direction)
+		printHTTPData(req, resp, err, rawData)
+	}
+	return nil
+}
+
+// printHTTPData 打印HTTP数据的函数
+func printHTTPData(req *types.HTTPRequest, resp *types.HTTPResponse, parseErr error, rawData []byte) {
+	if parseErr != nil {
+		// 如果解析失败，打印原始数据
+		fmt.Printf("Failed to parse HTTP data: %v\n", parseErr)
 		// 清理不可打印字符
+		data := string(rawData)
 		data = strings.Map(func(r rune) rune {
 			if r >= 32 && r < 127 {
 				return r
 			}
 			return '.'
 		}, data)
-
-		fmt.Printf("Data: %s\n", data)
+		fmt.Printf("Raw Data: %s\n", data)
+		return
 	}
 
-	fmt.Println(strings.Repeat("-", 80))
-	return nil
+	timestamp := time.Now()
+
+	// 打印解析结果
+	if req != nil {
+		fmt.Printf("\n=== HTTP REQUEST === %s\n", timestamp)
+		fmt.Printf("Method: %s\n", req.Method)
+		fmt.Printf("URL: %s\n", req.URL)
+		fmt.Printf("Version: %d.%d\n", req.ProtoMajor, req.ProtoMinor)
+		
+		// 打印HTTP/2相关信息
+		if req.StreamID != nil {
+			fmt.Printf("Stream ID: %d\n", *req.StreamID)
+		}
+		
+		fmt.Printf("Headers:\n")
+		for key, values := range req.Headers {
+			for _, value := range values {
+				fmt.Printf("  %s: %s\n", key, value)
+			}
+		}
+		if len(req.Body) > 0 {
+			fmt.Printf("Body: %s\n", string(req.Body))
+		}
+		fmt.Printf("==================\n\n")
+	}
+	if resp != nil {
+		fmt.Printf("\n=== HTTP RESPONSE === %s\n", timestamp)
+		fmt.Printf("Status: %s\n", resp.Status)
+		fmt.Printf("Version: %d.%d\n", resp.ProtoMajor, resp.ProtoMinor)
+		
+		// 打印HTTP/2相关信息
+		if resp.StreamID != nil {
+			fmt.Printf("Stream ID: %d\n", *resp.StreamID)
+		}
+		
+		fmt.Printf("Headers:\n")
+		for key, values := range resp.Headers {
+			for _, value := range values {
+				fmt.Printf("  %s: %s\n", key, value)
+			}
+		}
+		if len(resp.Body) > 0 {
+			fmt.Printf("Body: %s\n", string(resp.Body))
+		}
+		fmt.Printf("===================\n\n")
+	}
 }

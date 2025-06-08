@@ -22,6 +22,7 @@ type tlsTlsDataEvent struct {
 	IsRead    uint8
 	Pad       [3]uint8
 	Comm      [16]int8
+	SslPtr    uint64
 }
 
 // loadTls returns the embedded CollectionSpec for tls.
