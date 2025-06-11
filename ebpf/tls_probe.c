@@ -25,8 +25,8 @@ struct meta {
     __u8 _pad[3];
     char comm[COMM_LEN];
     __u64 ssl_ptr;
-    __u64 conn_id;          // 保留原有的conn_id
-    struct tcp_tuple tuple; // 新增TCP四元组
+    __u64 conn_id;          
+    struct tcp_tuple tuple; 
     __u8 tuple_valid;       // 四元组是否有效
     __u8 _pad2[3];
 } __attribute__((packed));

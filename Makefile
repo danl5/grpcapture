@@ -34,14 +34,14 @@ generate: vmlinux
 		tls ./ebpf/tls_probe.c
 
 build: generate
-	go build -o tls-capture ./cmd/
+	go build -o grpcapture ./cmd/
 
 clean:
 	rm -f cmd/tls_x86*.go cmd/tls_x86*.o
-	rm -f tls-capture
+	rm -f grpcapture
 
 clean-all: clean
 	rm -f ebpf/vmlinux.h
 
 run: build
-	sudo ./tls-capture
+	sudo ./grpcapture
