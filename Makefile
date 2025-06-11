@@ -30,8 +30,7 @@ generate: vmlinux
 		-cc clang \
 		-target $(TARGET) \
 		-output-dir cmd \
-		-cflags "-O2 -g -Wall $(ARCH_FLAGS) -I./ebpf" \
-		-type tls_data_event \
+		-cflags "-O2 -g -Wall $(ARCH_FLAGS) -I./ebpf -D__USE_ATTRIBUTES__" \
 		tls ./ebpf/tls_probe.c
 
 build: generate

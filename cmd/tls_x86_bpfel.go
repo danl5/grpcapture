@@ -12,19 +12,6 @@ import (
 	"github.com/cilium/ebpf"
 )
 
-type tlsDataBuffer struct{ Data [4096]uint8 }
-
-type tlsTlsDataEvent struct {
-	Pid       uint32
-	Tid       uint32
-	Timestamp uint64
-	DataLen   uint32
-	IsRead    uint8
-	Pad       [3]uint8
-	Comm      [16]int8
-	SslPtr    uint64
-}
-
 // loadTls returns the embedded CollectionSpec for tls.
 func loadTls() (*ebpf.CollectionSpec, error) {
 	reader := bytes.NewReader(_TlsBytes)
@@ -77,12 +64,10 @@ type tlsProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type tlsMapSpecs struct {
-	DataBufferMap  *ebpf.MapSpec `ebpf:"data_buffer_map"`
-	EventBufferMap *ebpf.MapSpec `ebpf:"event_buffer_map"`
-	SslReadArgs    *ebpf.MapSpec `ebpf:"ssl_read_args"`
-	SslWriteArgs   *ebpf.MapSpec `ebpf:"ssl_write_args"`
-	TargetPids     *ebpf.MapSpec `ebpf:"target_pids"`
-	TlsEvents      *ebpf.MapSpec `ebpf:"tls_events"`
+	SslReadArgs  *ebpf.MapSpec `ebpf:"ssl_read_args"`
+	SslWriteArgs *ebpf.MapSpec `ebpf:"ssl_write_args"`
+	Stats        *ebpf.MapSpec `ebpf:"stats"`
+	TlsEvents    *ebpf.MapSpec `ebpf:"tls_events"`
 }
 
 // tlsVariableSpecs contains global variables before they are loaded into the kernel.
@@ -111,21 +96,17 @@ func (o *tlsObjects) Close() error {
 //
 // It can be passed to loadTlsObjects or ebpf.CollectionSpec.LoadAndAssign.
 type tlsMaps struct {
-	DataBufferMap  *ebpf.Map `ebpf:"data_buffer_map"`
-	EventBufferMap *ebpf.Map `ebpf:"event_buffer_map"`
-	SslReadArgs    *ebpf.Map `ebpf:"ssl_read_args"`
-	SslWriteArgs   *ebpf.Map `ebpf:"ssl_write_args"`
-	TargetPids     *ebpf.Map `ebpf:"target_pids"`
-	TlsEvents      *ebpf.Map `ebpf:"tls_events"`
+	SslReadArgs  *ebpf.Map `ebpf:"ssl_read_args"`
+	SslWriteArgs *ebpf.Map `ebpf:"ssl_write_args"`
+	Stats        *ebpf.Map `ebpf:"stats"`
+	TlsEvents    *ebpf.Map `ebpf:"tls_events"`
 }
 
 func (m *tlsMaps) Close() error {
 	return _TlsClose(
-		m.DataBufferMap,
-		m.EventBufferMap,
 		m.SslReadArgs,
 		m.SslWriteArgs,
-		m.TargetPids,
+		m.Stats,
 		m.TlsEvents,
 	)
 }

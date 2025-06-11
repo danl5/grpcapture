@@ -4,276 +4,365 @@ package main
 
 import (
 	"bytes"
-	"encoding/binary"
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
-	"strings"
+	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
-	"github.com/cilium/ebpf/perf"
+	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
 	"github.com/danl5/htrack"
 	"github.com/danl5/htrack/types"
 )
 
-type TLSDataEvent struct {
-	PID       uint32
-	TID       uint32
-	Timestamp uint64
-	DataLen   uint32
-	IsRead    uint8
-	_         [3]byte // padding
-	Comm      [16]byte
-	SSLPtr    uint64 // SSL 结构体指针，用作连接标识
-	Data      [16384]byte
-}
-
-// HTTPSession 表示一个HTTP会话
-type HTTPSession struct {
-	htrack *htrack.HTrack
-}
-
-// httpSessions 存储所有活跃的HTTP会话
-var httpSessions = make(map[string]*HTTPSession)
-
-// initHTTPTracker 初始化HTTP跟踪器
-func initHTTPTracker() *htrack.HTrack {
-	config := htrack.DefaultConfig()
-	return htrack.New(config)
+// ConnectionInfo 存储连接的详细信息
+type ConnectionInfo struct {
+	ID              string
+	OriginalSSLPtr  uint64
+	PID             uint32
+	Comm            string
+	CreatedAt       time.Time
+	LastActivity    time.Time
+	SequenceNumber  uint64
+	DataPacketCount int
+	mutex           sync.RWMutex
 }
 
 func main() {
-	// 移除内存限制
-	if err := rlimit.RemoveMemlock(); err != nil {
-		log.Fatal(err)
-	}
-
-	// 加载 eBPF 程序
-	spec, err := loadTls()
+	// 设置 eBPF
+	ebpfSetup, err := setupEBPF()
 	if err != nil {
-		log.Fatalf("Failed to load eBPF program: %v", err)
+		log.Fatalf("eBPF setup failed: %v", err)
 	}
-
-	coll, err := ebpf.NewCollection(spec)
-	if err != nil {
-		log.Fatalf("Failed to create collection: %v", err)
-	}
-	defer coll.Close()
-
-	// 附加 uprobes
-	ex := "/usr/lib/x86_64-linux-gnu/libssl.so.3"
-
-	// SSL_write uprobe
-	sslWrite, err := link.OpenExecutable(ex)
-	if err != nil {
-		log.Fatalf("Failed to open executable: %v", err)
-	}
-
-	writeProbe, err := sslWrite.Uprobe("SSL_write", coll.Programs["probe_entry_ssl_write"], nil)
-	if err != nil {
-		log.Fatalf("Failed to attach SSL_write uprobe: %v", err)
-	}
-	defer writeProbe.Close()
-
-	readProbe, err := sslWrite.Uprobe("SSL_read", coll.Programs["probe_entry_ssl_read"], nil)
-	if err != nil {
-		log.Fatalf("Failed to attach SSL_read uretprobe: %v", err)
-	}
-	defer readProbe.Close()
-
-	// SSL_write uretprobe
-	writeRetProbe, err := sslWrite.Uretprobe("SSL_write", coll.Programs["probe_return_ssl_write"], nil)
-	if err != nil {
-		log.Fatalf("Failed to attach SSL_write uretprobe: %v", err)
-	}
-	defer writeRetProbe.Close()
-
-	// SSL_read uretprobe
-	readRetProbe, err := sslWrite.Uretprobe("SSL_read", coll.Programs["probe_return_ssl_read"], nil)
-	if err != nil {
-		log.Fatalf("Failed to attach SSL_read uretprobe: %v", err)
-	}
-	defer readRetProbe.Close()
-
-	// 创建 perf reader
-	rd, err := perf.NewReader(coll.Maps["tls_events"], os.Getpagesize())
-	if err != nil {
-		log.Fatalf("Failed to create perf reader: %v", err)
-	}
-	defer rd.Close()
+	defer ebpfSetup.Close()
 
 	// 初始化 HTTP 解析器
-	initHTTPParser()
+	hTracker := initHTTPParser()
+
+	// 使用context管理goroutine生命周期
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// 启动HTTP数据处理
+	go processHTTPData(ctx, hTracker)
+
+	// 创建事件channel
+	eventCh := make(chan ringbuf.Record, 100) // 带缓冲的channel提高吞吐量[1,2](@ref)
+
+	// 启动ringbuf事件读取goroutine
+	go func() {
+		defer close(eventCh) // 确保退出时关闭channel
+		for {
+			record, err := ebpfSetup.rd.Read()
+			if err != nil {
+				if errors.Is(err, ringbuf.ErrClosed) {
+					log.Println("Ringbuf reader closed")
+					return
+				}
+				log.Printf("Reading from ringbuf failed: %v", err)
+				continue
+			}
+			select {
+			case eventCh <- record:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 
 	// 信号处理
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		fmt.Println("\nStopping...")
+		cancel()
+	}()
 
 	fmt.Println("Capturing TLS data... Press Ctrl+C to stop.")
 
-	go func() {
-		<-sig
-		fmt.Println("\nStopping...")
-		os.Exit(0)
-	}()
-
+	// 事件处理循环
 	for {
-		if err := processEvent(rd); err != nil {
-			if errors.Is(err, perf.ErrClosed) {
+		select {
+		case <-ctx.Done():
+			// printStats(ebpfSetup.coll)
+			return
+		case record, ok := <-eventCh:
+			if !ok {
+				log.Println("Event channel closed, exiting")
 				return
 			}
-			log.Printf("Error processing event: %v", err)
+			if err := processRecord(record, hTracker); err != nil {
+				log.Printf("Error processing event: %v", err)
+			}
 		}
 	}
-}
-
-// 动态查找 TLS 库
-func findTLSLibraries() []string {
-	libraries := []string{}
-
-	// OpenSSL
-	openssl := []string{
-		"/usr/lib/x86_64-linux-gnu/libssl.so.3",
-	}
-
-	// GnuTLS
-	gnutls := []string{
-		"/usr/lib/x86_64-linux-gnu/libgnutls.so.30",
-	}
-
-	// 检查库是否存在
-	for _, lib := range append(openssl, gnutls...) {
-		if _, err := os.Stat(lib); err == nil {
-			libraries = append(libraries, lib)
-		}
-	}
-
-	return libraries
 }
 
 // 初始化 HTTP 解析器
-func initHTTPParser() {
+func initHTTPParser() *htrack.HTrack {
 	log.Println("HTTP parser initialized")
+	return htrack.New(&htrack.Config{
+		MaxSessions:       10000,
+		MaxTransactions:   10000,
+		BufferSize:        64 * 1024, // 64KB
+		EnableHTTP1:       true,
+		EnableHTTP2:       true,
+		AutoCleanup:       true,
+		CleanupInterval:   5 * time.Minute,
+		ChannelBufferSize: 100,
+		EnableChannels:    true,
+	})
 }
 
-// 在 main.go 中更新 processEvent 函数
-func processEvent(rd *perf.Reader) error {
-	// 读取事件元数据
-	record, err := rd.Read()
-	if err != nil {
-		return err
+// HTTP数据处理协程
+func processHTTPData(ctx context.Context, hTracker *htrack.HTrack) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case req := <-hTracker.GetRequestChan():
+			printHTTPData(req, nil)
+		case resp := <-hTracker.GetResponseChan():
+			printHTTPData(nil, resp)
+		}
 	}
+}
 
-	if record.LostSamples != 0 {
-		log.Printf("Lost %d samples", record.LostSamples)
-		return nil
-	}
+type tlsMeta struct {
+	Pid       uint32
+	Tid       uint32
+	Timestamp uint64
+	DataLen   uint32
+	IsRead    uint8
+	Pad       [3]uint8
+	Comm      [16]int8
+	SslPtr    uint64
+	ConnId    uint64
+}
 
-	var event tlsTlsDataEvent
-	if err := binary.Read(bytes.NewBuffer(record.RawSample), binary.LittleEndian, &event); err != nil {
-		log.Printf("Failed to decode event: %v", err)
-		return nil
-	}
+type tlsTlsEvent struct {
+	Meta tlsMeta
+	Data [16384]uint8
+}
 
+// 处理ringbuf记录
+func processRecord(record ringbuf.Record, hTracker *htrack.HTrack) error {
+
+	event := (*tlsTlsEvent)(unsafe.Pointer(&record.RawSample[0]))
+	meta := event.Meta
+	metaSize := unsafe.Sizeof(meta)
+
+	// 优化方向判断逻辑
 	direction := types.DirectionServerToClient
-	if event.IsRead == 1 {
+	if meta.IsRead == 1 {
 		direction = types.DirectionClientToServer
 	}
 
-	commBytes := make([]byte, len(event.Comm))
-	for i, v := range event.Comm {
-		commBytes[i] = byte(v)
+	// 提取元数据
+	commBytes := *(*[16]byte)(unsafe.Pointer(&meta.Comm[0]))
+	comm := bytes.TrimRight(commBytes[:], "\x00")
+
+	// 提取数据部分 - 从meta之后开始提取实际数据
+	dataLen := int(meta.DataLen)
+	if dataLen <= 0 || dataLen > len(record.RawSample)-int(metaSize) {
+		return fmt.Errorf("invalid data length: %d, available: %d", dataLen, len(record.RawSample)-int(metaSize))
 	}
-	comm := string(bytes.TrimRight(commBytes, "\x00"))
+	// 数据从meta结构体之后开始
+	rawData := record.RawSample[metaSize : metaSize+uintptr(dataLen)]
 
-	// 如果有数据，读取数据部分
-	if event.DataLen > 0 {
-		dataRecord, err := rd.Read()
-		if err != nil {
-			log.Printf("Failed to read data: %v", err)
-			return nil
-		}
-
-		// 获取原始数据
-		rawData := dataRecord.RawSample[:min(int(event.DataLen), len(dataRecord.RawSample))]
-
-		// 创建连接级别的会话ID（基于PID、进程名和SSL指针）
-		sessionID := fmt.Sprintf("%d-%s-%x", event.Pid, comm, event.SslPtr)
-
-		// 使用htrack解析数据
-		req, resp, err := htrack.ProcessHTTPPacket(sessionID, rawData, direction)
-		printHTTPData(req, resp, err, rawData)
+	// 使用PID+TID+ConnID作为唯一标识符
+	sessionID := fmt.Sprintf("%s-%d-%d-%d", comm, meta.Pid, meta.Tid, meta.ConnId)
+	if err := hTracker.ProcessPacket(sessionID, rawData, direction); err != nil {
+		return fmt.Errorf("parse data failed: %w", err)
 	}
+
 	return nil
 }
 
-// printHTTPData 打印HTTP数据的函数
-func printHTTPData(req *types.HTTPRequest, resp *types.HTTPResponse, parseErr error, rawData []byte) {
-	if parseErr != nil {
-		// 如果解析失败，打印原始数据
-		fmt.Printf("Failed to parse HTTP data: %v\n", parseErr)
-		// 清理不可打印字符
-		data := string(rawData)
-		data = strings.Map(func(r rune) rune {
-			if r >= 32 && r < 127 {
-				return r
-			}
-			return '.'
-		}, data)
-		fmt.Printf("Raw Data: %s\n", data)
-		return
-	}
+// 优化打印函数
+func printHTTPData(req *types.HTTPRequest, resp *types.HTTPResponse) {
+	timestamp := time.Now().Format("2006-01-02 15:04:05")
 
-	timestamp := time.Now()
-
-	// 打印解析结果
 	if req != nil {
 		fmt.Printf("\n=== HTTP REQUEST === %s\n", timestamp)
-		fmt.Printf("Method: %s\n", req.Method)
-		fmt.Printf("URL: %s\n", req.URL)
-		fmt.Printf("Version: %d.%d\n", req.ProtoMajor, req.ProtoMinor)
-		
-		// 打印HTTP/2相关信息
+		fmt.Printf("Method: %s\nURL: %s\nVersion: %d.%d\n",
+			req.Method, req.URL, req.ProtoMajor, req.ProtoMinor)
+
 		if req.StreamID != nil {
 			fmt.Printf("Stream ID: %d\n", *req.StreamID)
 		}
-		
-		fmt.Printf("Headers:\n")
-		for key, values := range req.Headers {
-			for _, value := range values {
-				fmt.Printf("  %s: %s\n", key, value)
-			}
-		}
+
+		printHeaders(req.Headers)
 		if len(req.Body) > 0 {
 			fmt.Printf("Body: %s\n", string(req.Body))
 		}
 		fmt.Printf("==================\n\n")
 	}
+
 	if resp != nil {
 		fmt.Printf("\n=== HTTP RESPONSE === %s\n", timestamp)
-		fmt.Printf("Status: %s\n", resp.Status)
-		fmt.Printf("Version: %d.%d\n", resp.ProtoMajor, resp.ProtoMinor)
-		
-		// 打印HTTP/2相关信息
+		fmt.Printf("Status: %s\nVersion: %d.%d\n",
+			resp.Status, resp.ProtoMajor, resp.ProtoMinor)
+
 		if resp.StreamID != nil {
 			fmt.Printf("Stream ID: %d\n", *resp.StreamID)
 		}
-		
-		fmt.Printf("Headers:\n")
-		for key, values := range resp.Headers {
-			for _, value := range values {
-				fmt.Printf("  %s: %s\n", key, value)
-			}
-		}
+
+		printHeaders(resp.Headers)
 		if len(resp.Body) > 0 {
 			fmt.Printf("Body: %s\n", string(resp.Body))
 		}
 		fmt.Printf("===================\n\n")
 	}
+}
+
+// 提取公共头部打印逻辑
+func printHeaders(headers map[string][]string) {
+	fmt.Println("Headers:")
+	for key, values := range headers {
+		for _, value := range values {
+			fmt.Printf("  %s: %s\n", key, value)
+		}
+	}
+}
+
+// eBPFSetup 结构体优化
+type eBPFSetup struct {
+	coll          *ebpf.Collection
+	rd            *ringbuf.Reader
+	writeProbe    link.Link
+	readProbe     link.Link
+	writeRetProbe link.Link
+	readRetProbe  link.Link
+}
+
+// Close 方法优化
+func (e *eBPFSetup) Close() {
+	closers := []io.Closer{
+		e.writeProbe,
+		e.readProbe,
+		e.writeRetProbe,
+		e.readRetProbe,
+		e.rd,
+	}
+
+	for _, closer := range closers {
+		if closer != nil {
+			if err := closer.Close(); err != nil {
+				log.Printf("Error closing resource: %v", err)
+			}
+		}
+	}
+
+	if e.coll != nil {
+		e.coll.Close()
+	}
+}
+
+// eBPF设置优化
+func setupEBPF() (*eBPFSetup, error) {
+	if err := rlimit.RemoveMemlock(); err != nil {
+		return nil, fmt.Errorf("failed to remove memory limit: %v", err)
+	}
+
+	spec, err := loadTls()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load eBPF program: %v", err)
+	}
+
+	opts := ebpf.CollectionOptions{
+		Programs: ebpf.ProgramOptions{
+			LogLevel: ebpf.LogLevelInstruction, // 输出每条指令的验证状态
+		},
+	}
+
+	// 2. 使用 opts 加载 eBPF 程序集合
+	coll, err := ebpf.NewCollectionWithOptions(spec, opts)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create collection: %v", err)
+	}
+
+	ex := "/usr/lib/x86_64-linux-gnu/libssl.so.3"
+	sslWrite, err := link.OpenExecutable(ex)
+	if err != nil {
+		coll.Close()
+		return nil, fmt.Errorf("failed to open executable: %v", err)
+	}
+
+	setup := &eBPFSetup{coll: coll}
+
+	attachUprobe := func(fnName string, prog *ebpf.Program) (link.Link, error) {
+		return sslWrite.Uprobe(fnName, prog, nil)
+	}
+
+	attachUretprobe := func(fnName string, prog *ebpf.Program) (link.Link, error) {
+		return sslWrite.Uretprobe(fnName, prog, nil)
+	}
+
+	// 附加探针
+	if setup.writeProbe, err = attachUprobe("SSL_write", coll.Programs["probe_entry_ssl_write"]); err != nil {
+		setup.Close()
+		return nil, err
+	}
+	if setup.readProbe, err = attachUprobe("SSL_read", coll.Programs["probe_entry_ssl_read"]); err != nil {
+		setup.Close()
+		return nil, err
+	}
+	if setup.writeRetProbe, err = attachUretprobe("SSL_write", coll.Programs["probe_return_ssl_write"]); err != nil {
+		setup.Close()
+		return nil, err
+	}
+	if setup.readRetProbe, err = attachUretprobe("SSL_read", coll.Programs["probe_return_ssl_read"]); err != nil {
+		setup.Close()
+		return nil, err
+	}
+
+	// 创建ringbuf reader替换perf reader
+	setup.rd, err = ringbuf.NewReader(coll.Maps["tls_events"])
+	if err != nil {
+		setup.Close()
+		return nil, fmt.Errorf("failed to create ringbuf reader: %v", err)
+	}
+
+	return setup, nil
+}
+
+// 打印统计信息
+func printStats(coll *ebpf.Collection) {
+	statsMap := coll.Maps["stats"]
+	if statsMap == nil {
+		log.Println("Stats map not found")
+		return
+	}
+
+	// 读取write事件计数
+	var writeKey uint32 = 0
+	var writeCount uint64
+	if err := statsMap.Lookup(&writeKey, &writeCount); err != nil {
+		log.Printf("Failed to read write stats: %v", err)
+		writeCount = 0
+	}
+
+	// 读取read事件计数
+	var readKey uint32 = 1
+	var readCount uint64
+	if err := statsMap.Lookup(&readKey, &readCount); err != nil {
+		log.Printf("Failed to read read stats: %v", err)
+		readCount = 0
+	}
+
+	fmt.Printf("\n=== Ring Buffer 统计信息 ===\n")
+	fmt.Printf("SSL_write 事件提交次数: %d\n", writeCount)
+	fmt.Printf("SSL_read 事件提交次数: %d\n", readCount)
+	fmt.Printf("总提交次数: %d\n", writeCount+readCount)
 }
