@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -38,8 +37,7 @@ type ConnectionInfo struct {
 }
 
 func main() {
-	// 设置 eBPF
-	ebpfSetup, err := setupEBPF()
+	ebpfSetup, err := setupBpf()
 	if err != nil {
 		log.Fatalf("eBPF setup failed: %v", err)
 	}
@@ -48,7 +46,6 @@ func main() {
 	// 初始化 HTTP 解析器
 	hTracker := initHTTPParser()
 
-	// 使用context管理goroutine生命周期
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -56,11 +53,11 @@ func main() {
 	go processHTTPData(ctx, hTracker)
 
 	// 创建事件channel
-	eventCh := make(chan ringbuf.Record, 100) // 带缓冲的channel提高吞吐量[1,2](@ref)
+	eventCh := make(chan ringbuf.Record, 100)
 
 	// 启动ringbuf事件读取goroutine
 	go func() {
-		defer close(eventCh) // 确保退出时关闭channel
+		defer close(eventCh)
 		for {
 			record, err := ebpfSetup.rd.Read()
 			if err != nil {
@@ -138,21 +135,41 @@ func processHTTPData(ctx context.Context, hTracker *htrack.HTrack) {
 	}
 }
 
+// TCP四元组结构体
+type tcpTuple struct {
+	Saddr uint32 // 源IP地址
+	Daddr uint32 // 目标IP地址
+	Sport uint16 // 源端口
+	Dport uint16 // 目标端口
+}
+
 type tlsMeta struct {
-	Pid       uint32
-	Tid       uint32
-	Timestamp uint64
-	DataLen   uint32
-	IsRead    uint8
-	Pad       [3]uint8
-	Comm      [16]int8
-	SslPtr    uint64
-	ConnId    uint64
+	Pid        uint32
+	Tid        uint32
+	Timestamp  uint64
+	DataLen    uint32
+	IsRead     uint8
+	Pad        [3]uint8
+	Comm       [16]int8
+	SslPtr     uint64
+	ConnId     uint64   // 保留原有的conn_id
+	Tuple      tcpTuple // 新增TCP四元组
+	TupleValid uint8    // 四元组是否有效
+	Pad2       [3]uint8 // 对齐填充
 }
 
 type tlsTlsEvent struct {
 	Meta tlsMeta
 	Data [16384]uint8
+}
+
+// 辅助函数：将uint32 IP地址转换为字符串
+func uint32ToIP(ip uint32) string {
+	return fmt.Sprintf("%d.%d.%d.%d",
+		(ip>>24)&0xFF,
+		(ip>>16)&0xFF,
+		(ip>>8)&0xFF,
+		ip&0xFF)
 }
 
 // 处理ringbuf记录
@@ -180,8 +197,40 @@ func processRecord(record ringbuf.Record, hTracker *htrack.HTrack) error {
 	// 数据从meta结构体之后开始
 	rawData := record.RawSample[metaSize : metaSize+uintptr(dataLen)]
 
-	// 使用PID+TID+ConnID作为唯一标识符
-	sessionID := fmt.Sprintf("%s-%d-%d-%d", comm, meta.Pid, meta.Tid, meta.ConnId)
+	// 构造会话ID - 优先使用TCP四元组，回退到原有方案
+	var sessionID string
+	if meta.TupleValid == 1 {
+		fmt.Println("connid", meta.ConnId)
+		sessionID = fmt.Sprintf("%d", meta.ConnId)
+
+		// 根据isRead字段调整四元组显示方向
+		var srcIP, dstIP string
+		var srcPort, dstPort uint16
+
+		if meta.IsRead == 1 {
+			// 读取操作：数据从远程流向本地（客户端 -> 服务端）
+			srcIP = uint32ToIP(meta.Tuple.Daddr) // 远程地址作为源
+			srcPort = meta.Tuple.Dport           // 远程端口作为源
+			dstIP = uint32ToIP(meta.Tuple.Saddr) // 本地地址作为目标
+			dstPort = meta.Tuple.Sport           // 本地端口作为目标
+			fmt.Printf("[DEBUG] TCP Tuple (READ): %s:%d -> %s:%d (PID: %d, SSL: 0x%x)\n",
+				srcIP, srcPort, dstIP, dstPort, meta.Pid, meta.SslPtr)
+		} else {
+			// 写入操作：数据从本地流向远程（服务端 -> 客户端）
+			srcIP = uint32ToIP(meta.Tuple.Saddr) // 本地地址作为源
+			srcPort = meta.Tuple.Sport           // 本地端口作为源
+			dstIP = uint32ToIP(meta.Tuple.Daddr) // 远程地址作为目标
+			dstPort = meta.Tuple.Dport           // 远程端口作为目标
+			fmt.Printf("[DEBUG] TCP Tuple (WRITE): %s:%d -> %s:%d (PID: %d, SSL: 0x%x)\n",
+				srcIP, srcPort, dstIP, dstPort, meta.Pid, meta.SslPtr)
+		}
+	} else {
+		// 回退到原有的PID+TID+ConnID方案
+		sessionID = fmt.Sprintf("%s-%d-%d-%d", comm, meta.Pid, meta.Tid, meta.ConnId)
+		fmt.Printf("[DEBUG] Fallback to legacy ConnID: %d (PID: %d, SSL: 0x%x)\n",
+			meta.ConnId, meta.Pid, meta.SslPtr)
+	}
+
 	if err := hTracker.ProcessPacket(sessionID, rawData, direction); err != nil {
 		return fmt.Errorf("parse data failed: %w", err)
 	}
@@ -244,22 +293,56 @@ type eBPFSetup struct {
 	readProbe     link.Link
 	writeRetProbe link.Link
 	readRetProbe  link.Link
+	// 新增的监测点
+	tracepointLinks []link.Link
+	kprobeLinks     []link.Link
 }
 
 // Close 方法优化
 func (e *eBPFSetup) Close() {
-	closers := []io.Closer{
-		e.writeProbe,
-		e.readProbe,
-		e.writeRetProbe,
-		e.readRetProbe,
-		e.rd,
+	// 关闭uprobe链接
+	if e.writeProbe != nil {
+		if err := e.writeProbe.Close(); err != nil {
+			log.Printf("Error closing writeProbe: %v", err)
+		}
+	}
+	if e.readProbe != nil {
+		if err := e.readProbe.Close(); err != nil {
+			log.Printf("Error closing readProbe: %v", err)
+		}
+	}
+	if e.writeRetProbe != nil {
+		if err := e.writeRetProbe.Close(); err != nil {
+			log.Printf("Error closing writeRetProbe: %v", err)
+		}
+	}
+	if e.readRetProbe != nil {
+		if err := e.readRetProbe.Close(); err != nil {
+			log.Printf("Error closing readRetProbe: %v", err)
+		}
 	}
 
-	for _, closer := range closers {
-		if closer != nil {
-			if err := closer.Close(); err != nil {
-				log.Printf("Error closing resource: %v", err)
+	// 关闭ringbuf reader
+	if e.rd != nil {
+		if err := e.rd.Close(); err != nil {
+			log.Printf("Error closing ringbuf reader: %v", err)
+		}
+	}
+
+	// 关闭tracepoint链接
+	for _, tpLink := range e.tracepointLinks {
+		if tpLink != nil {
+			if err := tpLink.Close(); err != nil {
+				log.Printf("Error closing tracepoint link: %v", err)
+			}
+		}
+	}
+
+	// 关闭kprobe链接
+	for _, kpLink := range e.kprobeLinks {
+		if kpLink != nil {
+			if err := kpLink.Close(); err != nil {
+				log.Printf("Error closing kprobe link: %v", err)
 			}
 		}
 	}
@@ -269,8 +352,7 @@ func (e *eBPFSetup) Close() {
 	}
 }
 
-// eBPF设置优化
-func setupEBPF() (*eBPFSetup, error) {
+func setupBpf() (*eBPFSetup, error) {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return nil, fmt.Errorf("failed to remove memory limit: %v", err)
 	}
@@ -286,14 +368,14 @@ func setupEBPF() (*eBPFSetup, error) {
 		},
 	}
 
-	// 2. 使用 opts 加载 eBPF 程序集合
+	// 使用 opts 加载 eBPF 程序集合
 	coll, err := ebpf.NewCollectionWithOptions(spec, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create collection: %v", err)
 	}
 
 	ex := "/usr/lib/x86_64-linux-gnu/libssl.so.3"
-	sslWrite, err := link.OpenExecutable(ex)
+	sslLib, err := link.OpenExecutable(ex)
 	if err != nil {
 		coll.Close()
 		return nil, fmt.Errorf("failed to open executable: %v", err)
@@ -301,33 +383,78 @@ func setupEBPF() (*eBPFSetup, error) {
 
 	setup := &eBPFSetup{coll: coll}
 
-	attachUprobe := func(fnName string, prog *ebpf.Program) (link.Link, error) {
-		return sslWrite.Uprobe(fnName, prog, nil)
+	// 定义挂载点配置结构
+	type attachConfig struct {
+		name        string
+		programName string
+		attachType  string     // "uprobe", "uretprobe", "tracepoint", "kprobe"
+		group       string     // 仅用于tracepoint
+		target      *link.Link // 存储链接的指针
 	}
 
-	attachUretprobe := func(fnName string, prog *ebpf.Program) (link.Link, error) {
-		return sslWrite.Uretprobe(fnName, prog, nil)
+	// 统一配置所有挂载点
+	attachConfigs := []attachConfig{
+		// SSL uprobe/uretprobe
+		{"SSL_write", "probe_entry_ssl_write", "uprobe", "", &setup.writeProbe},
+		{"SSL_read", "probe_entry_ssl_read", "uprobe", "", &setup.readProbe},
+		{"SSL_write", "probe_return_ssl_write", "uretprobe", "", &setup.writeRetProbe},
+		{"SSL_read", "probe_return_ssl_read", "uretprobe", "", &setup.readRetProbe},
+		// Tracepoint
+		{"sys_enter_sendto", "trace_enter_sendto", "tracepoint", "syscalls", nil},
+		{"sys_enter_recvfrom", "trace_enter_recvfrom", "tracepoint", "syscalls", nil},
+		{"sys_enter_sendmsg", "trace_enter_send", "tracepoint", "syscalls", nil},
+		{"sys_enter_recvmsg", "trace_enter_recv", "tracepoint", "syscalls", nil},
+		// Kprobe
+		{"tcp_sendmsg", "trace_tcp_sendmsg", "kprobe", "", nil},
+		{"tcp_recvmsg", "trace_tcp_recvmsg", "kprobe", "", nil},
 	}
 
-	// 附加探针
-	if setup.writeProbe, err = attachUprobe("SSL_write", coll.Programs["probe_entry_ssl_write"]); err != nil {
-		setup.Close()
-		return nil, err
-	}
-	if setup.readProbe, err = attachUprobe("SSL_read", coll.Programs["probe_entry_ssl_read"]); err != nil {
-		setup.Close()
-		return nil, err
-	}
-	if setup.writeRetProbe, err = attachUretprobe("SSL_write", coll.Programs["probe_return_ssl_write"]); err != nil {
-		setup.Close()
-		return nil, err
-	}
-	if setup.readRetProbe, err = attachUretprobe("SSL_read", coll.Programs["probe_return_ssl_read"]); err != nil {
-		setup.Close()
-		return nil, err
+	// 统一处理所有挂载点
+	for _, config := range attachConfigs {
+		prog, exists := coll.Programs[config.programName]
+		if !exists {
+			log.Printf("Warning: program %s not found", config.programName)
+			continue
+		}
+
+		var attachLink link.Link
+
+		switch config.attachType {
+		case "uprobe":
+			attachLink, err = sslLib.Uprobe(config.name, prog, nil)
+		case "uretprobe":
+			attachLink, err = sslLib.Uretprobe(config.name, prog, nil)
+		case "tracepoint":
+			attachLink, err = link.Tracepoint(config.group, config.name, prog, nil)
+		case "kprobe":
+			attachLink, err = link.Kprobe(config.name, prog, nil)
+		default:
+			log.Printf("Warning: unknown attach type %s for %s", config.attachType, config.name)
+			continue
+		}
+
+		if err != nil {
+			setup.Close()
+			return nil, fmt.Errorf("failed to attach %s %s: %v", config.attachType, config.name, err)
+		}
+
+		// 根据类型存储链接
+		if config.target != nil {
+			*config.target = attachLink
+		} else {
+			// 对于tracepoint和kprobe，添加到相应的切片中
+			switch config.attachType {
+			case "tracepoint":
+				setup.tracepointLinks = append(setup.tracepointLinks, attachLink)
+			case "kprobe":
+				setup.kprobeLinks = append(setup.kprobeLinks, attachLink)
+			}
+		}
+
+		log.Printf("Successfully attached %s: %s", config.attachType, config.name)
 	}
 
-	// 创建ringbuf reader替换perf reader
+	// 创建ringbuf reader
 	setup.rd, err = ringbuf.NewReader(coll.Maps["tls_events"])
 	if err != nil {
 		setup.Close()

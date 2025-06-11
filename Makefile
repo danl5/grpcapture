@@ -30,7 +30,7 @@ generate: vmlinux
 		-cc clang \
 		-target $(TARGET) \
 		-output-dir cmd \
-		-cflags "-O2 -g -Wall $(ARCH_FLAGS) -I./ebpf -D__USE_ATTRIBUTES__" \
+		-cflags "-O2 -g -gdwarf-4 -Wall $(ARCH_FLAGS) -I./ebpf -D__USE_ATTRIBUTES__ -target bpf -D__BPF_TRACING__ -Wno-unused-value -Wno-pointer-sign -Wno-compare-distinct-pointer-types -Wno-gnu-variable-sized-type-not-at-end -Wno-address-of-packed-member -Wno-tautological-compare -Wno-unknown-warning-option" \
 		tls ./ebpf/tls_probe.c
 
 build: generate

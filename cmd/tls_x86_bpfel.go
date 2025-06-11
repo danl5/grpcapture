@@ -58,16 +58,25 @@ type tlsProgramSpecs struct {
 	ProbeEntrySslWrite  *ebpf.ProgramSpec `ebpf:"probe_entry_ssl_write"`
 	ProbeReturnSslRead  *ebpf.ProgramSpec `ebpf:"probe_return_ssl_read"`
 	ProbeReturnSslWrite *ebpf.ProgramSpec `ebpf:"probe_return_ssl_write"`
+	TraceEnterRecv      *ebpf.ProgramSpec `ebpf:"trace_enter_recv"`
+	TraceEnterRecvfrom  *ebpf.ProgramSpec `ebpf:"trace_enter_recvfrom"`
+	TraceEnterSend      *ebpf.ProgramSpec `ebpf:"trace_enter_send"`
+	TraceEnterSendto    *ebpf.ProgramSpec `ebpf:"trace_enter_sendto"`
+	TraceTcpRecvmsg     *ebpf.ProgramSpec `ebpf:"trace_tcp_recvmsg"`
+	TraceTcpSendmsg     *ebpf.ProgramSpec `ebpf:"trace_tcp_sendmsg"`
 }
 
 // tlsMapSpecs contains maps before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type tlsMapSpecs struct {
-	SslReadArgs  *ebpf.MapSpec `ebpf:"ssl_read_args"`
-	SslWriteArgs *ebpf.MapSpec `ebpf:"ssl_write_args"`
-	Stats        *ebpf.MapSpec `ebpf:"stats"`
-	TlsEvents    *ebpf.MapSpec `ebpf:"tls_events"`
+	ActiveSslSockets *ebpf.MapSpec `ebpf:"active_ssl_sockets"`
+	SockStorage      *ebpf.MapSpec `ebpf:"sock_storage"`
+	SslOperationFlag *ebpf.MapSpec `ebpf:"ssl_operation_flag"`
+	SslReadArgs      *ebpf.MapSpec `ebpf:"ssl_read_args"`
+	SslWriteArgs     *ebpf.MapSpec `ebpf:"ssl_write_args"`
+	Stats            *ebpf.MapSpec `ebpf:"stats"`
+	TlsEvents        *ebpf.MapSpec `ebpf:"tls_events"`
 }
 
 // tlsVariableSpecs contains global variables before they are loaded into the kernel.
@@ -96,14 +105,20 @@ func (o *tlsObjects) Close() error {
 //
 // It can be passed to loadTlsObjects or ebpf.CollectionSpec.LoadAndAssign.
 type tlsMaps struct {
-	SslReadArgs  *ebpf.Map `ebpf:"ssl_read_args"`
-	SslWriteArgs *ebpf.Map `ebpf:"ssl_write_args"`
-	Stats        *ebpf.Map `ebpf:"stats"`
-	TlsEvents    *ebpf.Map `ebpf:"tls_events"`
+	ActiveSslSockets *ebpf.Map `ebpf:"active_ssl_sockets"`
+	SockStorage      *ebpf.Map `ebpf:"sock_storage"`
+	SslOperationFlag *ebpf.Map `ebpf:"ssl_operation_flag"`
+	SslReadArgs      *ebpf.Map `ebpf:"ssl_read_args"`
+	SslWriteArgs     *ebpf.Map `ebpf:"ssl_write_args"`
+	Stats            *ebpf.Map `ebpf:"stats"`
+	TlsEvents        *ebpf.Map `ebpf:"tls_events"`
 }
 
 func (m *tlsMaps) Close() error {
 	return _TlsClose(
+		m.ActiveSslSockets,
+		m.SockStorage,
+		m.SslOperationFlag,
 		m.SslReadArgs,
 		m.SslWriteArgs,
 		m.Stats,
@@ -125,6 +140,12 @@ type tlsPrograms struct {
 	ProbeEntrySslWrite  *ebpf.Program `ebpf:"probe_entry_ssl_write"`
 	ProbeReturnSslRead  *ebpf.Program `ebpf:"probe_return_ssl_read"`
 	ProbeReturnSslWrite *ebpf.Program `ebpf:"probe_return_ssl_write"`
+	TraceEnterRecv      *ebpf.Program `ebpf:"trace_enter_recv"`
+	TraceEnterRecvfrom  *ebpf.Program `ebpf:"trace_enter_recvfrom"`
+	TraceEnterSend      *ebpf.Program `ebpf:"trace_enter_send"`
+	TraceEnterSendto    *ebpf.Program `ebpf:"trace_enter_sendto"`
+	TraceTcpRecvmsg     *ebpf.Program `ebpf:"trace_tcp_recvmsg"`
+	TraceTcpSendmsg     *ebpf.Program `ebpf:"trace_tcp_sendmsg"`
 }
 
 func (p *tlsPrograms) Close() error {
@@ -133,6 +154,12 @@ func (p *tlsPrograms) Close() error {
 		p.ProbeEntrySslWrite,
 		p.ProbeReturnSslRead,
 		p.ProbeReturnSslWrite,
+		p.TraceEnterRecv,
+		p.TraceEnterRecvfrom,
+		p.TraceEnterSend,
+		p.TraceEnterSendto,
+		p.TraceTcpRecvmsg,
+		p.TraceTcpSendmsg,
 	)
 }
 
