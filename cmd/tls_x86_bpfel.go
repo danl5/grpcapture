@@ -54,6 +54,8 @@ type tlsSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type tlsProgramSpecs struct {
+	KprobeSockRecvmsg         *ebpf.ProgramSpec `ebpf:"kprobe_sock_recvmsg"`
+	KprobeSockSendmsg         *ebpf.ProgramSpec `ebpf:"kprobe_sock_sendmsg"`
 	ProbeEntrySslRead         *ebpf.ProgramSpec `ebpf:"probe_entry_ssl_read"`
 	ProbeEntrySslWrite        *ebpf.ProgramSpec `ebpf:"probe_entry_ssl_write"`
 	ProbeGnutlsRecordRecv     *ebpf.ProgramSpec `ebpf:"probe_gnutls_record_recv"`
@@ -166,6 +168,8 @@ type tlsVariables struct {
 //
 // It can be passed to loadTlsObjects or ebpf.CollectionSpec.LoadAndAssign.
 type tlsPrograms struct {
+	KprobeSockRecvmsg         *ebpf.Program `ebpf:"kprobe_sock_recvmsg"`
+	KprobeSockSendmsg         *ebpf.Program `ebpf:"kprobe_sock_sendmsg"`
 	ProbeEntrySslRead         *ebpf.Program `ebpf:"probe_entry_ssl_read"`
 	ProbeEntrySslWrite        *ebpf.Program `ebpf:"probe_entry_ssl_write"`
 	ProbeGnutlsRecordRecv     *ebpf.Program `ebpf:"probe_gnutls_record_recv"`
@@ -195,6 +199,8 @@ type tlsPrograms struct {
 
 func (p *tlsPrograms) Close() error {
 	return _TlsClose(
+		p.KprobeSockRecvmsg,
+		p.KprobeSockSendmsg,
 		p.ProbeEntrySslRead,
 		p.ProbeEntrySslWrite,
 		p.ProbeGnutlsRecordRecv,

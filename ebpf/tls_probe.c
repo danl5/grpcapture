@@ -2,6 +2,16 @@
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
+#include <bpf/bpf_endian.h>
+
+// 字节序转换宏定义
+#ifndef bpf_ntohl
+#define bpf_ntohl(x) __bpf_ntohl(x)
+#endif
+
+#ifndef bpf_ntohs
+#define bpf_ntohs(x) __bpf_ntohs(x)
+#endif
 
 #define MAX_DATA_SIZE 16384
 #define MAX_ENTRIES 102400
@@ -603,12 +613,6 @@ int trace_enter_sendto(struct trace_event_raw_sys_enter *ctx) {
             // 这里我们记录文件描述符，后续可能需要通过其他方式关联
             bpf_printk("DEBUG: sys_enter_sendto - SSL active, sockfd=%u, ssl_ptr=%llx", sockfd, *ssl_ptr);
             
-            // 存储文件描述符信息，用于后续关联
-            struct fd_key fd_key = {
-                .pid_tgid = pid_tgid,
-                .fd = sockfd
-            };
-            
             // 这里我们暂时无法直接获取 sock 结构体
             // 但可以记录 fd 信息用于调试
             bpf_printk("DEBUG: sys_enter_sendto - Recorded fd=%d for SSL=%llx", sockfd, *ssl_ptr);
@@ -640,13 +644,6 @@ int trace_enter_sendmsg(struct trace_event_raw_sys_enter *ctx) {
         __u64 *ssl_ptr = bpf_map_lookup_elem(&current_ssl_ptr, &pid_tgid);
         if (ssl_ptr) {
             bpf_printk("DEBUG: sys_enter_sendmsg - SSL active, sockfd=%u, ssl_ptr=%llx", sockfd, *ssl_ptr);
-            
-            // 存储文件描述符信息
-            struct fd_key fd_key = {
-                .pid_tgid = pid_tgid,
-                .fd = sockfd
-            };
-            
             bpf_printk("DEBUG: sys_enter_sendmsg - Recorded fd=%d for SSL=%llx", sockfd, *ssl_ptr);
         }
         
