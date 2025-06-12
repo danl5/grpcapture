@@ -5,10 +5,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 	"unsafe"
@@ -18,12 +22,34 @@ import (
 	"github.com/danl5/htrack/types"
 )
 
+var (
+	targetPIDs []uint32
+	soFilePath string
+)
+
 func main() {
-	ebpfSetup, err := setupBpf()
+	// 解析命令行参数
+	parseCmdArgs()
+
+	ebpfSetup, err := setupBpf(soFilePath)
 	if err != nil {
 		log.Fatalf("eBPF setup failed: %v", err)
 	}
 	defer ebpfSetup.Close()
+
+	// 配置PID过滤
+	if len(targetPIDs) > 0 {
+		log.Printf("Enabling PID filter for PIDs: %v", targetPIDs)
+		if err := ebpfSetup.EnablePIDFilter(); err != nil {
+			log.Fatalf("Failed to enable PID filter: %v", err)
+		}
+		if err := ebpfSetup.AddPIDs(targetPIDs); err != nil {
+			log.Fatalf("Failed to add target PIDs: %v", err)
+		}
+		log.Printf("PID filter configured successfully")
+	} else {
+		log.Printf("No PID filter specified, monitoring all processes")
+	}
 
 	// 初始化 HTTP 解析器
 	hTracker := initTLSParser()
@@ -111,6 +137,18 @@ func processRecord(record ringbuf.Record, hTracker *htrack.HTrack) error {
 	meta := event.Meta
 	metaSize := unsafe.Sizeof(meta)
 
+	// 添加调试信息
+	log.Printf("DEBUG: Received event - PID=%d, SSL=%x, IsRead=%t, TupleValid=%t, DataLen=%d",
+		meta.Pid, meta.SslPtr, meta.IsRead == 1, meta.TupleValid == 1, meta.DataLen)
+
+	if meta.TupleValid == 1 {
+		log.Printf("DEBUG: Tuple - %s:%d -> %s:%d",
+			uint32ToIP(meta.Tuple.Saddr), meta.Tuple.Sport,
+			uint32ToIP(meta.Tuple.Daddr), meta.Tuple.Dport)
+	} else {
+		log.Printf("DEBUG: No valid tuple for this event")
+	}
+
 	// 优化方向判断逻辑
 	direction := types.DirectionServerToClient
 	if meta.IsRead == 1 {
@@ -131,13 +169,13 @@ func processRecord(record ringbuf.Record, hTracker *htrack.HTrack) error {
 
 	// 构造会话ID - 优先使用TCP四元组，回退到原有方案
 	var sessionID string
+	var srcIP, dstIP string
+	var srcPort, dstPort uint16
+
 	if meta.TupleValid == 1 {
 		sessionID = fmt.Sprintf("%d", meta.ConnId)
 
 		// 根据isRead字段调整四元组显示方向
-		var srcIP, dstIP string
-		var srcPort, dstPort uint16
-
 		if meta.IsRead == 1 {
 			// 读取操作：数据从远程流向本地（客户端 -> 服务端）
 			srcIP = uint32ToIP(meta.Tuple.Daddr) // 远程地址作为源
@@ -162,9 +200,88 @@ func processRecord(record ringbuf.Record, hTracker *htrack.HTrack) error {
 			meta.ConnId, meta.Pid, meta.SslPtr)
 	}
 
-	if err := hTracker.ProcessPacket(sessionID, rawData, direction); err != nil {
+	packetInfo := types.PacketInfo{
+		Direction: direction,
+		Data:      rawData,
+		TimeDiff:  meta.Timestamp,
+		TCPTuple: &types.TCPTuple{
+			SrcIP:   srcIP,
+			SrcPort: srcPort,
+			DstIP:   dstIP,
+			DstPort: dstPort,
+		},
+	}
+	if err := hTracker.ProcessPacket(sessionID, &packetInfo); err != nil {
 		return fmt.Errorf("parse data failed: %w", err)
 	}
 
 	return nil
+}
+
+// 解析命令行参数
+func parseCmdArgs() {
+	var pidStr = flag.String("pid", "", "Target PID to monitor")
+	var pidsStr = flag.String("pids", "", "Comma-separated list of PIDs to monitor")
+	var pidFile = flag.String("pid-file", "", "File containing PIDs to monitor (one per line)")
+	var soFile = flag.String("so-file", "/usr/lib/x86_64-linux-gnu/libssl.so.3", "Path to the SSL library file to monitor")
+
+	flag.Parse()
+
+	// 解析单个PID参数
+	if *pidStr != "" {
+		if pid, err := strconv.ParseUint(*pidStr, 10, 32); err == nil {
+			targetPIDs = append(targetPIDs, uint32(pid))
+		} else {
+			log.Printf("Warning: invalid PID format: %s", *pidStr)
+		}
+	}
+
+	// 解析多个PID参数
+	if *pidsStr != "" {
+		for _, pidStr := range strings.Split(*pidsStr, ",") {
+			pidStr = strings.TrimSpace(pidStr)
+			if pidStr != "" {
+				if pid, err := strconv.ParseUint(pidStr, 10, 32); err == nil {
+					targetPIDs = append(targetPIDs, uint32(pid))
+				} else {
+					log.Printf("Warning: invalid PID format: %s", pidStr)
+				}
+			}
+		}
+	}
+
+	// 从文件读取PID列表
+	if *pidFile != "" {
+		if data, err := ioutil.ReadFile(*pidFile); err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				line = strings.TrimSpace(line)
+				// 跳过空行和注释行
+				if line != "" && !strings.HasPrefix(line, "#") {
+					if pid, err := strconv.ParseUint(line, 10, 32); err == nil {
+						targetPIDs = append(targetPIDs, uint32(pid))
+					} else {
+						log.Printf("Warning: invalid PID format in file: %s", line)
+					}
+				}
+			}
+		} else {
+			log.Printf("Warning: failed to read PID file %s: %v", *pidFile, err)
+		}
+	}
+
+	// 去重PID列表
+	if len(targetPIDs) > 0 {
+		pidMap := make(map[uint32]bool)
+		uniquePIDs := make([]uint32, 0)
+		for _, pid := range targetPIDs {
+			if !pidMap[pid] {
+				pidMap[pid] = true
+				uniquePIDs = append(uniquePIDs, pid)
+			}
+		}
+		targetPIDs = uniquePIDs
+	}
+
+	// 设置so文件路径
+	soFilePath = *soFile
 }

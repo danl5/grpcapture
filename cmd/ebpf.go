@@ -51,6 +51,47 @@ type eBPFSetup struct {
 
 	tracepointLinks []link.Link
 	kprobeLinks     []link.Link
+
+	// PID过滤相关
+	pidFilter    *ebpf.Map
+	filterConfig *ebpf.Map
+}
+
+// PID过滤管理方法
+
+// 启用PID过滤
+func (e *eBPFSetup) EnablePIDFilter() error {
+	key := uint32(0)
+	value := uint8(1)
+	return e.filterConfig.Update(key, value, ebpf.UpdateAny)
+}
+
+// 禁用PID过滤
+func (e *eBPFSetup) DisablePIDFilter() error {
+	key := uint32(0)
+	value := uint8(0)
+	return e.filterConfig.Update(key, value, ebpf.UpdateAny)
+}
+
+// 添加允许的PID
+func (e *eBPFSetup) AddPID(pid uint32) error {
+	value := uint8(1)
+	return e.pidFilter.Update(pid, value, ebpf.UpdateAny)
+}
+
+// 移除PID
+func (e *eBPFSetup) RemovePID(pid uint32) error {
+	return e.pidFilter.Delete(pid)
+}
+
+// 批量添加PID
+func (e *eBPFSetup) AddPIDs(pids []uint32) error {
+	for _, pid := range pids {
+		if err := e.AddPID(pid); err != nil {
+			return fmt.Errorf("failed to add PID %d: %v", pid, err)
+		}
+	}
+	return nil
 }
 
 // Close 方法优化
@@ -107,7 +148,7 @@ func (e *eBPFSetup) Close() {
 	}
 }
 
-func setupBpf() (*eBPFSetup, error) {
+func setupBpf(soFilePath string) (*eBPFSetup, error) {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return nil, fmt.Errorf("failed to remove memory limit: %v", err)
 	}
@@ -129,8 +170,7 @@ func setupBpf() (*eBPFSetup, error) {
 		return nil, fmt.Errorf("failed to create collection: %v", err)
 	}
 
-	ex := "/usr/lib/x86_64-linux-gnu/libssl.so.3"
-	sslLib, err := link.OpenExecutable(ex)
+	sslLib, err := link.OpenExecutable(soFilePath)
 	if err != nil {
 		coll.Close()
 		return nil, fmt.Errorf("failed to open executable: %v", err)
@@ -148,20 +188,42 @@ func setupBpf() (*eBPFSetup, error) {
 	}
 
 	// 统一配置所有挂载点
+	// 注意：暂时禁用tracepoint和kprobe探针，只保留SSL uprobe/uretprobe
+	// 用于单独测试从SSL结构体获取socket的新功能
 	attachConfigs := []attachConfig{
-		// SSL uprobe/uretprobe
+		// SSL uprobe/uretprobe - 保持启用
 		{"SSL_write", "probe_entry_ssl_write", "uprobe", "", &setup.writeProbe},
 		{"SSL_read", "probe_entry_ssl_read", "uprobe", "", &setup.readProbe},
 		{"SSL_write", "probe_return_ssl_write", "uretprobe", "", &setup.writeRetProbe},
 		{"SSL_read", "probe_return_ssl_read", "uretprobe", "", &setup.readRetProbe},
-		// Tracepoint
+		// SSL extended functions
+		{"SSL_write_ex", "probe_entry_ssl_write_ex", "uprobe", "", nil},
+		{"SSL_read_ex", "probe_entry_ssl_read_ex", "uprobe", "", nil},
+		// GnuTLS functions
+		{"gnutls_record_send", "probe_entry_gnutls_record_send", "uprobe", "", nil},
+		{"gnutls_record_recv", "probe_entry_gnutls_record_recv", "uprobe", "", nil},
+		// Go TLS functions
+		{"crypto/tls.(*Conn).Write", "probe_entry_go_tls_write", "uprobe", "", nil},
+		{"crypto/tls.(*Conn).Read", "probe_entry_go_tls_read", "uprobe", "", nil},
+		// Syscalls tracepoints
 		{"sys_enter_sendto", "trace_enter_sendto", "tracepoint", "syscalls", nil},
+		{"sys_enter_sendmsg", "trace_enter_sendmsg", "tracepoint", "syscalls", nil},
+		{"sys_enter_write", "trace_enter_write", "tracepoint", "syscalls", nil},
 		{"sys_enter_recvfrom", "trace_enter_recvfrom", "tracepoint", "syscalls", nil},
-		{"sys_enter_sendmsg", "trace_enter_send", "tracepoint", "syscalls", nil},
-		{"sys_enter_recvmsg", "trace_enter_recv", "tracepoint", "syscalls", nil},
-		// Kprobe
+		{"sys_enter_recvmsg", "trace_enter_recvmsg", "tracepoint", "syscalls", nil},
+		{"sys_enter_read", "trace_enter_read", "tracepoint", "syscalls", nil},
+		// Socket syscalls
+		{"sys_enter_socket", "trace_enter_socket", "tracepoint", "syscalls", nil},
+		{"sys_exit_socket", "sys_exit_socket", "tracepoint", "syscalls", nil},
+		{"sys_enter_connect", "trace_enter_connect", "tracepoint", "syscalls", nil},
+		{"sys_exit_accept", "trace_exit_accept", "tracepoint", "syscalls", nil},
+		// TCP kprobes
 		{"tcp_sendmsg", "trace_tcp_sendmsg", "kprobe", "", nil},
 		{"tcp_recvmsg", "trace_tcp_recvmsg", "kprobe", "", nil},
+		{"tcp_data_queue", "trace_tcp_data_queue", "kprobe", "", nil},
+		{"tcp_write_xmit", "trace_tcp_write_xmit", "kprobe", "", nil},
+		{"__tcp_push_pending_frames", "trace_tcp_push_pending_frames", "kprobe", "", nil},
+
 	}
 
 	// 统一处理所有挂载点
@@ -214,6 +276,14 @@ func setupBpf() (*eBPFSetup, error) {
 	if err != nil {
 		setup.Close()
 		return nil, fmt.Errorf("failed to create ringbuf reader: %v", err)
+	}
+
+	// 初始化PID过滤相关Map
+	setup.pidFilter = coll.Maps["pid_filter"]
+	setup.filterConfig = coll.Maps["filter_config"]
+	if setup.pidFilter == nil || setup.filterConfig == nil {
+		setup.Close()
+		return nil, fmt.Errorf("failed to find PID filter maps")
 	}
 
 	return setup, nil
