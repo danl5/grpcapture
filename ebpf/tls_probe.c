@@ -144,13 +144,14 @@ static int should_filter_pid(__u32 pid) {
 struct ssl_conn_key {
     __u64 pid_tgid;    // 进程/线程ID
     __u64 ssl_ptr;     // SSL结构体指针
-};
+} __attribute__((packed));
 
 // 文件描述符到sock结构体的映射key
 struct fd_key {
     __u64 pid_tgid;    // 进程/线程ID
     int fd;           // 文件描述符
-};
+    int pad;          // 显式填充到8字节对齐
+} __attribute__((packed));
 
 // 用于存储从网络系统调用中获取的sock结构体
 // 使用SSL连接标识作为key，支持一个进程内的多个SSL连接
@@ -228,20 +229,18 @@ static void fill_meta(struct meta *m, __u64 pid_tgid, int is_read, const struct 
     
     // 尝试从 sock_storage 获取 sock 结构体并提取四元组
     struct ssl_conn_key key = {
-        .pid_tgid = pid_tgid,
-        .ssl_ptr = m->ssl_ptr
-    };
+         .pid_tgid = pid_tgid,
+         .ssl_ptr = m->ssl_ptr
+     };
     
     struct sock **sk_ptr = bpf_map_lookup_elem(&sock_storage, &key);
     if (sk_ptr && *sk_ptr) {
         struct sock *sk = *sk_ptr;
         if (extract_tcp_tuple(sk, &m->tuple) == 0) {
             m->tuple_valid = 1;
-            bpf_printk("DEBUG: fill_meta - TCP tuple extracted: %u.%u.%u.%u:%u -> %u.%u.%u.%u:%u",
-                      (m->tuple.saddr >> 24) & 0xFF, (m->tuple.saddr >> 16) & 0xFF,
-                      (m->tuple.saddr >> 8) & 0xFF, m->tuple.saddr & 0xFF, m->tuple.sport,
-                      (m->tuple.daddr >> 24) & 0xFF, (m->tuple.daddr >> 16) & 0xFF,
-                      (m->tuple.daddr >> 8) & 0xFF, m->tuple.daddr & 0xFF, m->tuple.dport);
+            bpf_printk("DEBUG: fill_meta - TCP tuple extracted successfully");
+            bpf_printk("DEBUG: fill_meta - src addr: 0x%x port: %u", m->tuple.saddr, m->tuple.sport);
+            bpf_printk("DEBUG: fill_meta - dst addr: 0x%x port: %u", m->tuple.daddr, m->tuple.dport);
         } else {
             bpf_printk("DEBUG: fill_meta - Failed to extract TCP tuple from sock=%p", sk);
         }
@@ -271,10 +270,11 @@ int probe_entry_ssl_write(struct pt_regs *ctx) {
         return 0; // 跳过此进程
     }
     
-    struct ssl_args args;
-    args.ssl = (void *)PT_REGS_PARM1(ctx);
-    args.buf = (void *)PT_REGS_PARM2(ctx);
-    args.num = (int)PT_REGS_PARM3(ctx);
+    struct ssl_args args = {
+        .ssl = (void *)PT_REGS_PARM1(ctx),
+        .buf = (void *)PT_REGS_PARM2(ctx),
+        .num = PT_REGS_PARM3(ctx)
+    };
     
     bpf_printk("DEBUG: SSL_write entry - pid=%u, ssl=%p", pid, args.ssl);
      bpf_printk("DEBUG: SSL_write entry - buf=%p, num=%d", args.buf, args.num);
@@ -351,9 +351,9 @@ int probe_return_ssl_write(struct pt_regs *ctx) {
     
     // 构造SSL连接key进行清理
     struct ssl_conn_key key = {
-        .pid_tgid = pid_tgid,
-        .ssl_ptr = (__u64)args->ssl
-    };
+         .pid_tgid = pid_tgid,
+         .ssl_ptr = (__u64)args->ssl
+     };
     bpf_map_delete_elem(&sock_storage, &key);
     
     // Clear SSL operation flag and current SSL pointer after SSL_write completes
@@ -375,10 +375,11 @@ int probe_entry_ssl_read(struct pt_regs *ctx) {
         return 0; // 跳过此进程
     }
     
-    struct ssl_args args;
-    args.ssl = (void *)PT_REGS_PARM1(ctx);
-    args.buf = (void *)PT_REGS_PARM2(ctx);
-    args.num = (int)PT_REGS_PARM3(ctx);
+    struct ssl_args args = {
+        .ssl = (void *)PT_REGS_PARM1(ctx),
+        .buf = (void *)PT_REGS_PARM2(ctx),
+        .num = PT_REGS_PARM3(ctx)
+    };
     
     bpf_printk("DEBUG: SSL_read entry - pid=%u, ssl=%p", pid, args.ssl);
      bpf_printk("DEBUG: SSL_read entry - buf=%p, num=%d", args.buf, args.num);
@@ -451,9 +452,9 @@ int probe_return_ssl_read(struct pt_regs *ctx) {
     
     // 构造SSL连接key进行清理
     struct ssl_conn_key key = {
-        .pid_tgid = pid_tgid,
-        .ssl_ptr = (__u64)args->ssl
-    };
+         .pid_tgid = pid_tgid,
+         .ssl_ptr = (__u64)args->ssl
+     };
     bpf_map_delete_elem(&sock_storage, &key);
     
     // Clear SSL operation flag and socket fd after SSL_read completes
@@ -474,7 +475,8 @@ static int get_socket_from_fd(__u32 sockfd, struct sock **sk_out) {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     struct fd_key key = {
         .pid_tgid = pid_tgid,
-        .fd = sockfd
+        .fd = sockfd,
+        .pad = 0
     };
     
     // 首先尝试从缓存的映射中获取
@@ -525,9 +527,9 @@ int kprobe_sock_sendmsg(struct pt_regs *ctx) {
     __u64 *ssl_ptr = bpf_map_lookup_elem(&current_ssl_ptr, &pid_tgid);
     if (ssl_ptr) {
         struct ssl_conn_key key = {
-            .pid_tgid = pid_tgid,
-            .ssl_ptr = *ssl_ptr
-        };
+             .pid_tgid = pid_tgid,
+             .ssl_ptr = *ssl_ptr
+         };
         
         // 存储 socket 结构体到 sock_storage
         bpf_map_update_elem(&sock_storage, &key, &sk, BPF_ANY);
@@ -573,9 +575,9 @@ int kprobe_sock_recvmsg(struct pt_regs *ctx) {
     __u64 *ssl_ptr = bpf_map_lookup_elem(&current_ssl_ptr, &pid_tgid);
     if (ssl_ptr) {
         struct ssl_conn_key key = {
-            .pid_tgid = pid_tgid,
-            .ssl_ptr = *ssl_ptr
-        };
+             .pid_tgid = pid_tgid,
+             .ssl_ptr = *ssl_ptr
+         };
         
         // 存储 socket 结构体到 sock_storage
         bpf_map_update_elem(&sock_storage, &key, &sk, BPF_ANY);
@@ -599,7 +601,11 @@ int trace_enter_sendto(struct trace_event_raw_sys_enter *ctx) {
     // Check if this process is currently in SSL operation
     __u8 *flag = bpf_map_lookup_elem(&ssl_operation_flag, &pid_tgid);
     if (flag && *flag == 1) {
-        __u32 sockfd = (__u32)ctx->args[0];
+        long unsigned int sockfd_arg;
+        if (bpf_probe_read_kernel(&sockfd_arg, sizeof(sockfd_arg), &ctx->args[0]) != 0) {
+            return 0;
+        }
+        __u32 sockfd = (__u32)sockfd_arg;
         bpf_printk("DEBUG: sys_enter_sendto - SSL active, sockfd=%u", sockfd);
         
         // 尝试通过系统调用参数获取 socket 信息
@@ -637,7 +643,11 @@ int trace_enter_sendmsg(struct trace_event_raw_sys_enter *ctx) {
     
     __u8 *flag = bpf_map_lookup_elem(&ssl_operation_flag, &pid_tgid);
     if (flag && *flag == 1) {
-        __u32 sockfd = (__u32)ctx->args[0];
+        long unsigned int sockfd_arg;
+        if (bpf_probe_read_kernel(&sockfd_arg, sizeof(sockfd_arg), &ctx->args[0]) != 0) {
+            return 0;
+        }
+        __u32 sockfd = (__u32)sockfd_arg;
         bpf_printk("DEBUG: sys_enter_sendmsg - SSL active, sockfd=%u", sockfd);
         
         // 尝试通过系统调用参数获取 socket 信息
@@ -864,7 +874,11 @@ int trace_enter_write(struct trace_event_raw_sys_enter *ctx) {
     
     __u8 *flag = bpf_map_lookup_elem(&ssl_operation_flag, &pid_tgid);
     if (flag && *flag == 1) {
-        __u32 sockfd = (__u32)ctx->args[0];
+        long unsigned int sockfd_arg;
+        if (bpf_probe_read_kernel(&sockfd_arg, sizeof(sockfd_arg), &ctx->args[0]) != 0) {
+            return 0;
+        }
+        __u32 sockfd = (__u32)sockfd_arg;
         bpf_printk("DEBUG: sys_enter_write - SSL active, sockfd=%u", sockfd);
         bpf_map_update_elem(&active_ssl_sockets, &pid_tgid, &sockfd, BPF_ANY);
     }
@@ -896,9 +910,9 @@ int trace_tcp_sendmsg(struct pt_regs *ctx) {
             if (sk) {
                 // 构造SSL连接key
                 struct ssl_conn_key key = {
-                    .pid_tgid = pid_tgid,
-                    .ssl_ptr = *ssl_ptr
-                };
+                     .pid_tgid = pid_tgid,
+                     .ssl_ptr = *ssl_ptr
+                 };
                 bpf_printk("DEBUG: tcp_sendmsg - Storing sock=%p for SSL=%llx, pid_tgid=%llx", sk, *ssl_ptr, pid_tgid);
                 // Store the sock structure in sock_storage with SSL-specific key
                 int ret = bpf_map_update_elem(&sock_storage, &key, &sk, BPF_ANY);
@@ -980,9 +994,9 @@ int trace_tcp_data_queue(struct pt_regs *ctx) {
             struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
             if (sk) {
                 struct ssl_conn_key key = {
-                    .pid_tgid = pid_tgid,
-                    .ssl_ptr = *ssl_ptr
-                };
+                     .pid_tgid = pid_tgid,
+                     .ssl_ptr = *ssl_ptr
+                 };
                 bpf_printk("DEBUG: tcp_data_queue - Storing sock=%p for SSL=%llx", sk, *ssl_ptr);
                 bpf_map_update_elem(&sock_storage, &key, &sk, BPF_ANY);
             }
@@ -1009,9 +1023,9 @@ int trace_tcp_write_xmit(struct pt_regs *ctx) {
             struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
             if (sk) {
                 struct ssl_conn_key key = {
-                    .pid_tgid = pid_tgid,
-                    .ssl_ptr = *ssl_ptr
-                };
+                     .pid_tgid = pid_tgid,
+                     .ssl_ptr = *ssl_ptr
+                 };
                 bpf_printk("DEBUG: tcp_write_xmit - Storing sock=%p for SSL=%llx", sk, *ssl_ptr);
                 bpf_map_update_elem(&sock_storage, &key, &sk, BPF_ANY);
             }
@@ -1038,9 +1052,9 @@ int trace_tcp_push_pending_frames(struct pt_regs *ctx) {
             struct sock *sk = (struct sock *)PT_REGS_PARM1(ctx);
             if (sk) {
                 struct ssl_conn_key key = {
-                    .pid_tgid = pid_tgid,
-                    .ssl_ptr = *ssl_ptr
-                };
+                     .pid_tgid = pid_tgid,
+                     .ssl_ptr = *ssl_ptr
+                 };
                 bpf_printk("DEBUG: tcp_push_pending_frames - Storing sock=%p for SSL=%llx", sk, *ssl_ptr);
                 bpf_map_update_elem(&sock_storage, &key, &sk, BPF_ANY);
             }
@@ -1064,7 +1078,11 @@ int trace_enter_recvfrom(struct trace_event_raw_sys_enter *ctx) {
     // Check if this process is currently in SSL operation
     __u8 *flag = bpf_map_lookup_elem(&ssl_operation_flag, &pid_tgid);
     if (flag && *flag == 1) {
-        __u32 sockfd = (__u32)ctx->args[0];
+        long unsigned int sockfd_arg;
+        if (bpf_probe_read_kernel(&sockfd_arg, sizeof(sockfd_arg), &ctx->args[0]) != 0) {
+            return 0;
+        }
+        __u32 sockfd = (__u32)sockfd_arg;
         bpf_printk("DEBUG: sys_enter_recvfrom - SSL active, sockfd=%u", sockfd);
         
         // 尝试从 sockfd 获取 socket 信息并存储到 sock_storage
@@ -1102,7 +1120,11 @@ int trace_enter_recvmsg(struct trace_event_raw_sys_enter *ctx) {
     
     __u8 *flag = bpf_map_lookup_elem(&ssl_operation_flag, &pid_tgid);
     if (flag && *flag == 1) {
-        __u32 sockfd = (__u32)ctx->args[0];
+        long unsigned int sockfd_arg;
+        if (bpf_probe_read_kernel(&sockfd_arg, sizeof(sockfd_arg), &ctx->args[0]) != 0) {
+            return 0;
+        }
+        __u32 sockfd = (__u32)sockfd_arg;
         bpf_printk("DEBUG: sys_enter_recvmsg - SSL active, sockfd=%u", sockfd);
         
         // 尝试从 sockfd 获取 socket 信息并存储到 sock_storage
@@ -1111,9 +1133,9 @@ int trace_enter_recvmsg(struct trace_event_raw_sys_enter *ctx) {
             struct sock *sk = NULL;
             if (get_socket_from_fd(sockfd, &sk) == 0 && sk) {
                 struct ssl_conn_key key = {
-                    .pid_tgid = pid_tgid,
-                    .ssl_ptr = *ssl_ptr
-                };
+                     .pid_tgid = pid_tgid,
+                     .ssl_ptr = *ssl_ptr
+                 };
                 bpf_printk("DEBUG: sys_enter_recvmsg - Storing sock=%p for SSL=%llx", sk, *ssl_ptr);
                 bpf_map_update_elem(&sock_storage, &key, &sk, BPF_ANY);
             }
@@ -1137,7 +1159,11 @@ int trace_enter_read(struct trace_event_raw_sys_enter *ctx) {
     
     __u8 *flag = bpf_map_lookup_elem(&ssl_operation_flag, &pid_tgid);
     if (flag && *flag == 1) {
-        __u32 sockfd = (__u32)ctx->args[0];
+        long unsigned int sockfd_arg;
+        if (bpf_probe_read_kernel(&sockfd_arg, sizeof(sockfd_arg), &ctx->args[0]) != 0) {
+            return 0;
+        }
+        __u32 sockfd = (__u32)sockfd_arg;
         bpf_printk("DEBUG: sys_enter_read - SSL active, sockfd=%u", sockfd);
         
         // 尝试从 sockfd 获取 socket 信息并存储到 sock_storage
@@ -1146,9 +1172,9 @@ int trace_enter_read(struct trace_event_raw_sys_enter *ctx) {
             struct sock *sk = NULL;
             if (get_socket_from_fd(sockfd, &sk) == 0 && sk) {
                 struct ssl_conn_key key = {
-                    .pid_tgid = pid_tgid,
-                    .ssl_ptr = *ssl_ptr
-                };
+                     .pid_tgid = pid_tgid,
+                     .ssl_ptr = *ssl_ptr
+                 };
                 bpf_printk("DEBUG: sys_enter_read - Storing sock=%p for SSL=%llx", sk, *ssl_ptr);
                 bpf_map_update_elem(&sock_storage, &key, &sk, BPF_ANY);
             }
@@ -1208,9 +1234,10 @@ int trace_exit_socket(struct trace_event_raw_sys_exit *ctx) {
         // 存储到fd_to_sock映射表中
         // 注意：需要新增一个BPF map用于存储fd到sock的映射
         struct fd_key key = {
-            .pid_tgid = pid_tgid,
-            .fd = sockfd
-        };
+             .pid_tgid = pid_tgid,
+             .fd = sockfd,
+             .pad = 0
+         };
         bpf_map_update_elem(&fd_to_sock_map, &key, &sk, BPF_ANY);
     } else {
         bpf_printk("DEBUG: sys_exit_socket - FAILED: could not get sock for sockfd=%d", sockfd);
@@ -1230,7 +1257,11 @@ int trace_enter_connect(struct trace_event_raw_sys_enter *ctx) {
     }
     
     // 获取connect的文件描述符
-    int sockfd = ctx->args[0];
+    long unsigned int sockfd_arg;
+    if (bpf_probe_read_kernel(&sockfd_arg, sizeof(sockfd_arg), &ctx->args[0]) != 0) {
+        return 0;
+    }
+    int sockfd = (int)sockfd_arg;
     bpf_printk("DEBUG: sys_enter_connect - pid=%u, sockfd=%d", pid, sockfd);
     
     // 尝试获取这个socket对应的sock结构体
@@ -1241,9 +1272,10 @@ int trace_enter_connect(struct trace_event_raw_sys_enter *ctx) {
         
         // 存储到fd_to_sock映射表中
         struct fd_key key = {
-            .pid_tgid = pid_tgid,
-            .fd = sockfd
-        };
+             .pid_tgid = pid_tgid,
+             .fd = sockfd,
+             .pad = 0
+         };
         bpf_map_update_elem(&fd_to_sock_map, &key, &sk, BPF_ANY);
         
         // 如果当前进程正在进行SSL操作，也更新sock_storage
@@ -1252,9 +1284,9 @@ int trace_enter_connect(struct trace_event_raw_sys_enter *ctx) {
             __u64 *ssl_ptr = bpf_map_lookup_elem(&current_ssl_ptr, &pid_tgid);
             if (ssl_ptr) {
                 struct ssl_conn_key ssl_key = {
-                    .pid_tgid = pid_tgid,
-                    .ssl_ptr = *ssl_ptr
-                };
+                     .pid_tgid = pid_tgid,
+                     .ssl_ptr = *ssl_ptr
+                 };
                 bpf_printk("DEBUG: sys_enter_connect - Updating sock_storage for SSL=%llx", *ssl_ptr);
                 bpf_map_update_elem(&sock_storage, &ssl_key, &sk, BPF_ANY);
             }
@@ -1290,9 +1322,10 @@ int trace_exit_accept(struct trace_event_raw_sys_exit *ctx) {
         
         // 存储到fd_to_sock映射表中
         struct fd_key key = {
-            .pid_tgid = pid_tgid,
-            .fd = sockfd
-        };
+             .pid_tgid = pid_tgid,
+             .fd = sockfd,
+             .pad = 0
+         };
         bpf_map_update_elem(&fd_to_sock_map, &key, &sk, BPF_ANY);
     }
     
