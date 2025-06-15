@@ -12,27 +12,30 @@ import (
 	"github.com/cilium/ebpf/rlimit"
 )
 
-// TCP四元组结构体
+// TCP四元组结构体 - 手动控制字段顺序和对齐
 type tcpTuple struct {
-	Saddr uint32 // 源IP地址
-	Daddr uint32 // 目标IP地址
-	Sport uint16 // 源端口
-	Dport uint16 // 目标端口
+	Saddr  uint32    // 源IP地址
+	Daddr  uint32    // 目标IP地址
+	Sport  uint16    // 源端口
+	Dport  uint16    // 目标端口
+	Family uint16    // 地址族 (AF_INET)
+	_      [0]uint16 // 强制对齐
 }
 
+// TLS元数据结构体
 type tlsMeta struct {
-	Pid        uint32
-	Tid        uint32
-	Timestamp  uint64
-	DataLen    uint32
-	IsRead     uint8
-	Pad        [3]uint8
-	Comm       [16]int8
-	SslPtr     uint64
-	ConnId     uint64   // 保留原有的conn_id
-	Tuple      tcpTuple // 新增TCP四元组
-	TupleValid uint8    // 四元组是否有效
-	Pad2       [3]uint8 // 对齐填充
+	Timestamp  uint64    // timestamp_ns (8字节)
+	Pid        uint32    // pid (4字节)
+	Tid        uint32    // tid (4字节)
+	DataLen    uint32    // data_len (4字节)
+	IsRead     uint8     // is_read (1字节)
+	TupleValid uint8     // tuple_valid (1字节)
+	Pad        [2]uint8  // _pad[2] (2字节)
+	Comm       [16]uint8 // comm[COMM_LEN] (16字节)
+	SslPtr     uint64    // ssl_ptr (8字节)
+	ConnId     uint64    // conn_id (8字节)
+	Tuple      tcpTuple  // TCP四元组 (14字节)
+	// 总计: 8+4+4+4+1+1+2+16+8+8+14 = 70字节
 }
 
 type tlsTlsEvent struct {
@@ -148,6 +151,34 @@ func (e *eBPFSetup) Close() {
 	}
 }
 
+// 判断是否为可选探针
+func isOptionalProbe(probeName string) bool {
+	optionalProbes := []string{
+		"gnutls_record_send",
+		"gnutls_record_recv",
+		"SSL_write_ex",
+		"SSL_read_ex",
+		"crypto/tls.(*Conn).Write",
+		"crypto/tls.(*Conn).Read",
+		"__sys_accept4",
+		"tcp_sendmsg",
+		"tcp_recvmsg",
+		"tcp_data_queue",
+		"tcp_write_xmit",
+		"__tcp_push_pending_frames",
+		"sys_connect",
+		"inet_accept",
+		"tcp_v4_destroy_sock",
+	}
+
+	for _, optional := range optionalProbes {
+		if probeName == optional {
+			return true
+		}
+	}
+	return false
+}
+
 func setupBpf(soFilePath string) (*eBPFSetup, error) {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return nil, fmt.Errorf("failed to remove memory limit: %v", err)
@@ -223,7 +254,16 @@ func setupBpf(soFilePath string) (*eBPFSetup, error) {
 		{"tcp_data_queue", "trace_tcp_data_queue", "kprobe", "", nil},
 		{"tcp_write_xmit", "trace_tcp_write_xmit", "kprobe", "", nil},
 		{"__tcp_push_pending_frames", "trace_tcp_push_pending_frames", "kprobe", "", nil},
-
+		// 新增连接跟踪探针
+		{"sys_connect", "probe_connect", "kprobe", "", nil},
+		{"sys_connect", "retprobe_connect", "kretprobe", "", nil},
+		{"inet_accept", "probe_inet_accept", "kprobe", "", nil},
+		{"__sys_accept4", "retprobe_accept4", "kretprobe", "", nil},
+		{"tcp_v4_destroy_sock", "probe_tcp_v4_destroy_sock", "kprobe", "", nil},
+		// SSL连接映射探针
+		{"SSL_set_fd", "probe_SSL_set_fd", "uprobe", "", nil},
+		{"SSL_set_rfd", "probe_SSL_set_rfd", "uprobe", "", nil},
+		{"SSL_set_wfd", "probe_SSL_set_wfd", "uprobe", "", nil},
 	}
 
 	// 统一处理所有挂载点
@@ -245,12 +285,19 @@ func setupBpf(soFilePath string) (*eBPFSetup, error) {
 			attachLink, err = link.Tracepoint(config.group, config.name, prog, nil)
 		case "kprobe":
 			attachLink, err = link.Kprobe(config.name, prog, nil)
+		case "kretprobe":
+			attachLink, err = link.Kretprobe(config.name, prog, nil)
 		default:
 			log.Printf("Warning: unknown attach type %s for %s", config.attachType, config.name)
 			continue
 		}
 
 		if err != nil {
+			// 对于可选的探针（如 GnuTLS, BoringSSL, Go TLS），只记录警告而不退出
+			if isOptionalProbe(config.name) {
+				log.Printf("Warning: failed to attach optional %s %s: %v", config.attachType, config.name, err)
+				continue
+			}
 			setup.Close()
 			return nil, fmt.Errorf("failed to attach %s %s: %v", config.attachType, config.name, err)
 		}
@@ -263,7 +310,7 @@ func setupBpf(soFilePath string) (*eBPFSetup, error) {
 			switch config.attachType {
 			case "tracepoint":
 				setup.tracepointLinks = append(setup.tracepointLinks, attachLink)
-			case "kprobe":
+			case "kprobe", "kretprobe":
 				setup.kprobeLinks = append(setup.kprobeLinks, attachLink)
 			}
 		}

@@ -155,23 +155,26 @@ func processRecord(record ringbuf.Record, hTracker *htrack.HTrack) error {
 
 	event := (*tlsTlsEvent)(unsafe.Pointer(&record.RawSample[0]))
 	meta := event.Meta
-	metaSize := unsafe.Sizeof(meta)
 
-	// 提取数据部分 - 从meta之后开始提取实际数据
 	dataLen := int(meta.DataLen)
-	if dataLen <= 0 || dataLen > len(record.RawSample)-int(metaSize) {
-		return fmt.Errorf("invalid data length: %d, available: %d", dataLen, len(record.RawSample)-int(metaSize))
+	if dataLen <= 0 || dataLen > len(event.Data) {
+		return fmt.Errorf("invalid data length: %d, available: %d", dataLen, len(event.Data))
 	}
 
 	rawData := event.Data[:dataLen]
 
 	var sessionID string
 	if meta.TupleValid == 1 {
-		sessionID = fmt.Sprintf("%d", meta.ConnId)
+		// 使用规范化的TCP四元组生成会话ID，确保同一连接的双向流量使用相同ID
+		sessionID = generateNormalizedConnID(
+			meta.Tuple.Saddr, meta.Tuple.Daddr,
+			meta.Tuple.Sport, meta.Tuple.Dport)
 	} else {
-		// 回退到原有的PID+TID+ConnID方案
-		sessionID = fmt.Sprintf("%d-%d-%d", meta.Pid, meta.Tid, meta.ConnId)
+		// 回退到原有的PID+TID方案
+		sessionID = fmt.Sprintf("%d-%d-%d", meta.Pid, meta.Tid, meta.SslPtr)
 	}
+
+	fmt.Println(rawData)
 
 	packetInfo := buildPacketInfo(&meta, rawData)
 	if err := hTracker.ProcessPacket(sessionID, packetInfo); err != nil {
@@ -288,4 +291,19 @@ func parseCmdArgs() {
 	// 设置so文件路径
 	soFilePath = *soFile
 	printHex = *hex
+}
+
+// generateNormalizedConnID 生成规范化的连接ID
+// 通过比较IP地址和端口，确保同一连接的双向流量使用相同的连接ID
+func generateNormalizedConnID(saddr, daddr uint32, sport, dport uint16) string {
+	// 将IP地址转换为字符串进行比较
+	srcIP := uint32ToIP(saddr)
+	dstIP := uint32ToIP(daddr)
+
+	// 规范化：较小的IP:端口组合作为第一部分
+	if srcIP < dstIP || (srcIP == dstIP && sport < dport) {
+		return fmt.Sprintf("%s:%d-%s:%d", srcIP, sport, dstIP, dport)
+	} else {
+		return fmt.Sprintf("%s:%d-%s:%d", dstIP, dport, srcIP, sport)
+	}
 }

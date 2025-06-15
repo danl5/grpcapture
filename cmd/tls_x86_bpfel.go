@@ -54,57 +54,78 @@ type tlsSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type tlsProgramSpecs struct {
-	KprobeSockRecvmsg         *ebpf.ProgramSpec `ebpf:"kprobe_sock_recvmsg"`
-	KprobeSockSendmsg         *ebpf.ProgramSpec `ebpf:"kprobe_sock_sendmsg"`
-	ProbeEntrySslRead         *ebpf.ProgramSpec `ebpf:"probe_entry_ssl_read"`
-	ProbeEntrySslWrite        *ebpf.ProgramSpec `ebpf:"probe_entry_ssl_write"`
-	ProbeGnutlsRecordRecv     *ebpf.ProgramSpec `ebpf:"probe_gnutls_record_recv"`
-	ProbeGnutlsRecordSend     *ebpf.ProgramSpec `ebpf:"probe_gnutls_record_send"`
-	ProbeGoTlsRead            *ebpf.ProgramSpec `ebpf:"probe_go_tls_read"`
-	ProbeGoTlsWrite           *ebpf.ProgramSpec `ebpf:"probe_go_tls_write"`
-	ProbeReturnSslRead        *ebpf.ProgramSpec `ebpf:"probe_return_ssl_read"`
-	ProbeReturnSslWrite       *ebpf.ProgramSpec `ebpf:"probe_return_ssl_write"`
-	ProbeSslReadEx            *ebpf.ProgramSpec `ebpf:"probe_ssl_read_ex"`
-	ProbeSslWriteEx           *ebpf.ProgramSpec `ebpf:"probe_ssl_write_ex"`
-	TraceEnterConnect         *ebpf.ProgramSpec `ebpf:"trace_enter_connect"`
-	TraceEnterRead            *ebpf.ProgramSpec `ebpf:"trace_enter_read"`
-	TraceEnterRecvfrom        *ebpf.ProgramSpec `ebpf:"trace_enter_recvfrom"`
-	TraceEnterRecvmsg         *ebpf.ProgramSpec `ebpf:"trace_enter_recvmsg"`
-	TraceEnterSendmsg         *ebpf.ProgramSpec `ebpf:"trace_enter_sendmsg"`
-	TraceEnterSendto          *ebpf.ProgramSpec `ebpf:"trace_enter_sendto"`
-	TraceEnterSocket          *ebpf.ProgramSpec `ebpf:"trace_enter_socket"`
-	TraceEnterWrite           *ebpf.ProgramSpec `ebpf:"trace_enter_write"`
-	TraceExitAccept           *ebpf.ProgramSpec `ebpf:"trace_exit_accept"`
-	TraceExitSocket           *ebpf.ProgramSpec `ebpf:"trace_exit_socket"`
-	TraceTcpDataQueue         *ebpf.ProgramSpec `ebpf:"trace_tcp_data_queue"`
-	TraceTcpPushPendingFrames *ebpf.ProgramSpec `ebpf:"trace_tcp_push_pending_frames"`
-	TraceTcpRecvmsg           *ebpf.ProgramSpec `ebpf:"trace_tcp_recvmsg"`
-	TraceTcpSendmsg           *ebpf.ProgramSpec `ebpf:"trace_tcp_sendmsg"`
-	TraceTcpWriteXmit         *ebpf.ProgramSpec `ebpf:"trace_tcp_write_xmit"`
+	KprobeDevQueueXmit         *ebpf.ProgramSpec `ebpf:"kprobe_dev_queue_xmit"`
+	KprobeSockRecvmsg          *ebpf.ProgramSpec `ebpf:"kprobe_sock_recvmsg"`
+	KprobeSockSendmsg          *ebpf.ProgramSpec `ebpf:"kprobe_sock_sendmsg"`
+	ProbeSSL_setFd             *ebpf.ProgramSpec `ebpf:"probe_SSL_set_fd"`
+	ProbeSSL_setRfd            *ebpf.ProgramSpec `ebpf:"probe_SSL_set_rfd"`
+	ProbeSSL_setWfd            *ebpf.ProgramSpec `ebpf:"probe_SSL_set_wfd"`
+	ProbeConnect               *ebpf.ProgramSpec `ebpf:"probe_connect"`
+	ProbeEntryGnutlsRecordRecv *ebpf.ProgramSpec `ebpf:"probe_entry_gnutls_record_recv"`
+	ProbeEntryGnutlsRecordSend *ebpf.ProgramSpec `ebpf:"probe_entry_gnutls_record_send"`
+	ProbeEntryGoTlsRead        *ebpf.ProgramSpec `ebpf:"probe_entry_go_tls_read"`
+	ProbeEntryGoTlsWrite       *ebpf.ProgramSpec `ebpf:"probe_entry_go_tls_write"`
+	ProbeEntrySslRead          *ebpf.ProgramSpec `ebpf:"probe_entry_ssl_read"`
+	ProbeEntrySslReadEx        *ebpf.ProgramSpec `ebpf:"probe_entry_ssl_read_ex"`
+	ProbeEntrySslWrite         *ebpf.ProgramSpec `ebpf:"probe_entry_ssl_write"`
+	ProbeEntrySslWriteEx       *ebpf.ProgramSpec `ebpf:"probe_entry_ssl_write_ex"`
+	ProbeGnutlsBye             *ebpf.ProgramSpec `ebpf:"probe_gnutls_bye"`
+	ProbeGnutlsHandshake       *ebpf.ProgramSpec `ebpf:"probe_gnutls_handshake"`
+	ProbeGoNetTcpRead          *ebpf.ProgramSpec `ebpf:"probe_go_net_tcp_read"`
+	ProbeGoNetTcpWrite         *ebpf.ProgramSpec `ebpf:"probe_go_net_tcp_write"`
+	ProbeGoTlsClose            *ebpf.ProgramSpec `ebpf:"probe_go_tls_close"`
+	ProbeGoTlsHandshake        *ebpf.ProgramSpec `ebpf:"probe_go_tls_handshake"`
+	ProbeInetAccept            *ebpf.ProgramSpec `ebpf:"probe_inet_accept"`
+	ProbeReturnSslRead         *ebpf.ProgramSpec `ebpf:"probe_return_ssl_read"`
+	ProbeReturnSslWrite        *ebpf.ProgramSpec `ebpf:"probe_return_ssl_write"`
+	ProbeTcpV4DestroySock      *ebpf.ProgramSpec `ebpf:"probe_tcp_v4_destroy_sock"`
+	RetprobeAccept4            *ebpf.ProgramSpec `ebpf:"retprobe_accept4"`
+	RetprobeConnect            *ebpf.ProgramSpec `ebpf:"retprobe_connect"`
+	SysExitSocket              *ebpf.ProgramSpec `ebpf:"sys_exit_socket"`
+	TraceEnterConnect          *ebpf.ProgramSpec `ebpf:"trace_enter_connect"`
+	TraceEnterRead             *ebpf.ProgramSpec `ebpf:"trace_enter_read"`
+	TraceEnterRecvfrom         *ebpf.ProgramSpec `ebpf:"trace_enter_recvfrom"`
+	TraceEnterRecvmsg          *ebpf.ProgramSpec `ebpf:"trace_enter_recvmsg"`
+	TraceEnterSendmsg          *ebpf.ProgramSpec `ebpf:"trace_enter_sendmsg"`
+	TraceEnterSendto           *ebpf.ProgramSpec `ebpf:"trace_enter_sendto"`
+	TraceEnterSocket           *ebpf.ProgramSpec `ebpf:"trace_enter_socket"`
+	TraceEnterWrite            *ebpf.ProgramSpec `ebpf:"trace_enter_write"`
+	TraceExitAccept            *ebpf.ProgramSpec `ebpf:"trace_exit_accept"`
+	TraceTcpDataQueue          *ebpf.ProgramSpec `ebpf:"trace_tcp_data_queue"`
+	TraceTcpPushPendingFrames  *ebpf.ProgramSpec `ebpf:"trace_tcp_push_pending_frames"`
+	TraceTcpRecvmsg            *ebpf.ProgramSpec `ebpf:"trace_tcp_recvmsg"`
+	TraceTcpSendmsg            *ebpf.ProgramSpec `ebpf:"trace_tcp_sendmsg"`
+	TraceTcpWriteXmit          *ebpf.ProgramSpec `ebpf:"trace_tcp_write_xmit"`
 }
 
 // tlsMapSpecs contains maps before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type tlsMapSpecs struct {
-	ActiveSslSockets      *ebpf.MapSpec `ebpf:"active_ssl_sockets"`
-	CurrentSslPtr         *ebpf.MapSpec `ebpf:"current_ssl_ptr"`
-	FdToSockMap           *ebpf.MapSpec `ebpf:"fd_to_sock_map"`
-	FilterConfig          *ebpf.MapSpec `ebpf:"filter_config"`
-	PidFilter             *ebpf.MapSpec `ebpf:"pid_filter"`
-	SockStorage           *ebpf.MapSpec `ebpf:"sock_storage"`
-	SslOperationFlag      *ebpf.MapSpec `ebpf:"ssl_operation_flag"`
-	SslOperationTimestamp *ebpf.MapSpec `ebpf:"ssl_operation_timestamp"`
-	SslReadArgs           *ebpf.MapSpec `ebpf:"ssl_read_args"`
-	SslWriteArgs          *ebpf.MapSpec `ebpf:"ssl_write_args"`
-	Stats                 *ebpf.MapSpec `ebpf:"stats"`
-	TlsEvents             *ebpf.MapSpec `ebpf:"tls_events"`
+	ActiveAcceptArgs  *ebpf.MapSpec `ebpf:"active_accept_args"`
+	ActiveConnectArgs *ebpf.MapSpec `ebpf:"active_connect_args"`
+	ActiveSslSockets  *ebpf.MapSpec `ebpf:"active_ssl_sockets"`
+	ConnectEvents     *ebpf.MapSpec `ebpf:"connect_events"`
+	CurrentSslPtr     *ebpf.MapSpec `ebpf:"current_ssl_ptr"`
+	DataBufferHeap    *ebpf.MapSpec `ebpf:"data_buffer_heap"`
+	FdToSockMap       *ebpf.MapSpec `ebpf:"fd_to_sock_map"`
+	FilterConfig      *ebpf.MapSpec `ebpf:"filter_config"`
+	PidFilter         *ebpf.MapSpec `ebpf:"pid_filter"`
+	SockStorage       *ebpf.MapSpec `ebpf:"sock_storage"`
+	SslOperationFlag  *ebpf.MapSpec `ebpf:"ssl_operation_flag"`
+	SslReadArgs       *ebpf.MapSpec `ebpf:"ssl_read_args"`
+	SslStFd           *ebpf.MapSpec `ebpf:"ssl_st_fd"`
+	SslWriteArgs      *ebpf.MapSpec `ebpf:"ssl_write_args"`
+	Stats             *ebpf.MapSpec `ebpf:"stats"`
+	TcpFdInfos        *ebpf.MapSpec `ebpf:"tcp_fd_infos"`
+	TlsEvents         *ebpf.MapSpec `ebpf:"tls_events"`
 }
 
 // tlsVariableSpecs contains global variables before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type tlsVariableSpecs struct {
+	InvalidFD *ebpf.VariableSpec `ebpf:"invalidFD"`
 }
 
 // tlsObjects contains all objects after they have been loaded into the kernel.
@@ -127,33 +148,43 @@ func (o *tlsObjects) Close() error {
 //
 // It can be passed to loadTlsObjects or ebpf.CollectionSpec.LoadAndAssign.
 type tlsMaps struct {
-	ActiveSslSockets      *ebpf.Map `ebpf:"active_ssl_sockets"`
-	CurrentSslPtr         *ebpf.Map `ebpf:"current_ssl_ptr"`
-	FdToSockMap           *ebpf.Map `ebpf:"fd_to_sock_map"`
-	FilterConfig          *ebpf.Map `ebpf:"filter_config"`
-	PidFilter             *ebpf.Map `ebpf:"pid_filter"`
-	SockStorage           *ebpf.Map `ebpf:"sock_storage"`
-	SslOperationFlag      *ebpf.Map `ebpf:"ssl_operation_flag"`
-	SslOperationTimestamp *ebpf.Map `ebpf:"ssl_operation_timestamp"`
-	SslReadArgs           *ebpf.Map `ebpf:"ssl_read_args"`
-	SslWriteArgs          *ebpf.Map `ebpf:"ssl_write_args"`
-	Stats                 *ebpf.Map `ebpf:"stats"`
-	TlsEvents             *ebpf.Map `ebpf:"tls_events"`
+	ActiveAcceptArgs  *ebpf.Map `ebpf:"active_accept_args"`
+	ActiveConnectArgs *ebpf.Map `ebpf:"active_connect_args"`
+	ActiveSslSockets  *ebpf.Map `ebpf:"active_ssl_sockets"`
+	ConnectEvents     *ebpf.Map `ebpf:"connect_events"`
+	CurrentSslPtr     *ebpf.Map `ebpf:"current_ssl_ptr"`
+	DataBufferHeap    *ebpf.Map `ebpf:"data_buffer_heap"`
+	FdToSockMap       *ebpf.Map `ebpf:"fd_to_sock_map"`
+	FilterConfig      *ebpf.Map `ebpf:"filter_config"`
+	PidFilter         *ebpf.Map `ebpf:"pid_filter"`
+	SockStorage       *ebpf.Map `ebpf:"sock_storage"`
+	SslOperationFlag  *ebpf.Map `ebpf:"ssl_operation_flag"`
+	SslReadArgs       *ebpf.Map `ebpf:"ssl_read_args"`
+	SslStFd           *ebpf.Map `ebpf:"ssl_st_fd"`
+	SslWriteArgs      *ebpf.Map `ebpf:"ssl_write_args"`
+	Stats             *ebpf.Map `ebpf:"stats"`
+	TcpFdInfos        *ebpf.Map `ebpf:"tcp_fd_infos"`
+	TlsEvents         *ebpf.Map `ebpf:"tls_events"`
 }
 
 func (m *tlsMaps) Close() error {
 	return _TlsClose(
+		m.ActiveAcceptArgs,
+		m.ActiveConnectArgs,
 		m.ActiveSslSockets,
+		m.ConnectEvents,
 		m.CurrentSslPtr,
+		m.DataBufferHeap,
 		m.FdToSockMap,
 		m.FilterConfig,
 		m.PidFilter,
 		m.SockStorage,
 		m.SslOperationFlag,
-		m.SslOperationTimestamp,
 		m.SslReadArgs,
+		m.SslStFd,
 		m.SslWriteArgs,
 		m.Stats,
+		m.TcpFdInfos,
 		m.TlsEvents,
 	)
 }
@@ -162,55 +193,87 @@ func (m *tlsMaps) Close() error {
 //
 // It can be passed to loadTlsObjects or ebpf.CollectionSpec.LoadAndAssign.
 type tlsVariables struct {
+	InvalidFD *ebpf.Variable `ebpf:"invalidFD"`
 }
 
 // tlsPrograms contains all programs after they have been loaded into the kernel.
 //
 // It can be passed to loadTlsObjects or ebpf.CollectionSpec.LoadAndAssign.
 type tlsPrograms struct {
-	KprobeSockRecvmsg         *ebpf.Program `ebpf:"kprobe_sock_recvmsg"`
-	KprobeSockSendmsg         *ebpf.Program `ebpf:"kprobe_sock_sendmsg"`
-	ProbeEntrySslRead         *ebpf.Program `ebpf:"probe_entry_ssl_read"`
-	ProbeEntrySslWrite        *ebpf.Program `ebpf:"probe_entry_ssl_write"`
-	ProbeGnutlsRecordRecv     *ebpf.Program `ebpf:"probe_gnutls_record_recv"`
-	ProbeGnutlsRecordSend     *ebpf.Program `ebpf:"probe_gnutls_record_send"`
-	ProbeGoTlsRead            *ebpf.Program `ebpf:"probe_go_tls_read"`
-	ProbeGoTlsWrite           *ebpf.Program `ebpf:"probe_go_tls_write"`
-	ProbeReturnSslRead        *ebpf.Program `ebpf:"probe_return_ssl_read"`
-	ProbeReturnSslWrite       *ebpf.Program `ebpf:"probe_return_ssl_write"`
-	ProbeSslReadEx            *ebpf.Program `ebpf:"probe_ssl_read_ex"`
-	ProbeSslWriteEx           *ebpf.Program `ebpf:"probe_ssl_write_ex"`
-	TraceEnterConnect         *ebpf.Program `ebpf:"trace_enter_connect"`
-	TraceEnterRead            *ebpf.Program `ebpf:"trace_enter_read"`
-	TraceEnterRecvfrom        *ebpf.Program `ebpf:"trace_enter_recvfrom"`
-	TraceEnterRecvmsg         *ebpf.Program `ebpf:"trace_enter_recvmsg"`
-	TraceEnterSendmsg         *ebpf.Program `ebpf:"trace_enter_sendmsg"`
-	TraceEnterSendto          *ebpf.Program `ebpf:"trace_enter_sendto"`
-	TraceEnterSocket          *ebpf.Program `ebpf:"trace_enter_socket"`
-	TraceEnterWrite           *ebpf.Program `ebpf:"trace_enter_write"`
-	TraceExitAccept           *ebpf.Program `ebpf:"trace_exit_accept"`
-	TraceExitSocket           *ebpf.Program `ebpf:"trace_exit_socket"`
-	TraceTcpDataQueue         *ebpf.Program `ebpf:"trace_tcp_data_queue"`
-	TraceTcpPushPendingFrames *ebpf.Program `ebpf:"trace_tcp_push_pending_frames"`
-	TraceTcpRecvmsg           *ebpf.Program `ebpf:"trace_tcp_recvmsg"`
-	TraceTcpSendmsg           *ebpf.Program `ebpf:"trace_tcp_sendmsg"`
-	TraceTcpWriteXmit         *ebpf.Program `ebpf:"trace_tcp_write_xmit"`
+	KprobeDevQueueXmit         *ebpf.Program `ebpf:"kprobe_dev_queue_xmit"`
+	KprobeSockRecvmsg          *ebpf.Program `ebpf:"kprobe_sock_recvmsg"`
+	KprobeSockSendmsg          *ebpf.Program `ebpf:"kprobe_sock_sendmsg"`
+	ProbeSSL_setFd             *ebpf.Program `ebpf:"probe_SSL_set_fd"`
+	ProbeSSL_setRfd            *ebpf.Program `ebpf:"probe_SSL_set_rfd"`
+	ProbeSSL_setWfd            *ebpf.Program `ebpf:"probe_SSL_set_wfd"`
+	ProbeConnect               *ebpf.Program `ebpf:"probe_connect"`
+	ProbeEntryGnutlsRecordRecv *ebpf.Program `ebpf:"probe_entry_gnutls_record_recv"`
+	ProbeEntryGnutlsRecordSend *ebpf.Program `ebpf:"probe_entry_gnutls_record_send"`
+	ProbeEntryGoTlsRead        *ebpf.Program `ebpf:"probe_entry_go_tls_read"`
+	ProbeEntryGoTlsWrite       *ebpf.Program `ebpf:"probe_entry_go_tls_write"`
+	ProbeEntrySslRead          *ebpf.Program `ebpf:"probe_entry_ssl_read"`
+	ProbeEntrySslReadEx        *ebpf.Program `ebpf:"probe_entry_ssl_read_ex"`
+	ProbeEntrySslWrite         *ebpf.Program `ebpf:"probe_entry_ssl_write"`
+	ProbeEntrySslWriteEx       *ebpf.Program `ebpf:"probe_entry_ssl_write_ex"`
+	ProbeGnutlsBye             *ebpf.Program `ebpf:"probe_gnutls_bye"`
+	ProbeGnutlsHandshake       *ebpf.Program `ebpf:"probe_gnutls_handshake"`
+	ProbeGoNetTcpRead          *ebpf.Program `ebpf:"probe_go_net_tcp_read"`
+	ProbeGoNetTcpWrite         *ebpf.Program `ebpf:"probe_go_net_tcp_write"`
+	ProbeGoTlsClose            *ebpf.Program `ebpf:"probe_go_tls_close"`
+	ProbeGoTlsHandshake        *ebpf.Program `ebpf:"probe_go_tls_handshake"`
+	ProbeInetAccept            *ebpf.Program `ebpf:"probe_inet_accept"`
+	ProbeReturnSslRead         *ebpf.Program `ebpf:"probe_return_ssl_read"`
+	ProbeReturnSslWrite        *ebpf.Program `ebpf:"probe_return_ssl_write"`
+	ProbeTcpV4DestroySock      *ebpf.Program `ebpf:"probe_tcp_v4_destroy_sock"`
+	RetprobeAccept4            *ebpf.Program `ebpf:"retprobe_accept4"`
+	RetprobeConnect            *ebpf.Program `ebpf:"retprobe_connect"`
+	SysExitSocket              *ebpf.Program `ebpf:"sys_exit_socket"`
+	TraceEnterConnect          *ebpf.Program `ebpf:"trace_enter_connect"`
+	TraceEnterRead             *ebpf.Program `ebpf:"trace_enter_read"`
+	TraceEnterRecvfrom         *ebpf.Program `ebpf:"trace_enter_recvfrom"`
+	TraceEnterRecvmsg          *ebpf.Program `ebpf:"trace_enter_recvmsg"`
+	TraceEnterSendmsg          *ebpf.Program `ebpf:"trace_enter_sendmsg"`
+	TraceEnterSendto           *ebpf.Program `ebpf:"trace_enter_sendto"`
+	TraceEnterSocket           *ebpf.Program `ebpf:"trace_enter_socket"`
+	TraceEnterWrite            *ebpf.Program `ebpf:"trace_enter_write"`
+	TraceExitAccept            *ebpf.Program `ebpf:"trace_exit_accept"`
+	TraceTcpDataQueue          *ebpf.Program `ebpf:"trace_tcp_data_queue"`
+	TraceTcpPushPendingFrames  *ebpf.Program `ebpf:"trace_tcp_push_pending_frames"`
+	TraceTcpRecvmsg            *ebpf.Program `ebpf:"trace_tcp_recvmsg"`
+	TraceTcpSendmsg            *ebpf.Program `ebpf:"trace_tcp_sendmsg"`
+	TraceTcpWriteXmit          *ebpf.Program `ebpf:"trace_tcp_write_xmit"`
 }
 
 func (p *tlsPrograms) Close() error {
 	return _TlsClose(
+		p.KprobeDevQueueXmit,
 		p.KprobeSockRecvmsg,
 		p.KprobeSockSendmsg,
+		p.ProbeSSL_setFd,
+		p.ProbeSSL_setRfd,
+		p.ProbeSSL_setWfd,
+		p.ProbeConnect,
+		p.ProbeEntryGnutlsRecordRecv,
+		p.ProbeEntryGnutlsRecordSend,
+		p.ProbeEntryGoTlsRead,
+		p.ProbeEntryGoTlsWrite,
 		p.ProbeEntrySslRead,
+		p.ProbeEntrySslReadEx,
 		p.ProbeEntrySslWrite,
-		p.ProbeGnutlsRecordRecv,
-		p.ProbeGnutlsRecordSend,
-		p.ProbeGoTlsRead,
-		p.ProbeGoTlsWrite,
+		p.ProbeEntrySslWriteEx,
+		p.ProbeGnutlsBye,
+		p.ProbeGnutlsHandshake,
+		p.ProbeGoNetTcpRead,
+		p.ProbeGoNetTcpWrite,
+		p.ProbeGoTlsClose,
+		p.ProbeGoTlsHandshake,
+		p.ProbeInetAccept,
 		p.ProbeReturnSslRead,
 		p.ProbeReturnSslWrite,
-		p.ProbeSslReadEx,
-		p.ProbeSslWriteEx,
+		p.ProbeTcpV4DestroySock,
+		p.RetprobeAccept4,
+		p.RetprobeConnect,
+		p.SysExitSocket,
 		p.TraceEnterConnect,
 		p.TraceEnterRead,
 		p.TraceEnterRecvfrom,
@@ -220,7 +283,6 @@ func (p *tlsPrograms) Close() error {
 		p.TraceEnterSocket,
 		p.TraceEnterWrite,
 		p.TraceExitAccept,
-		p.TraceExitSocket,
 		p.TraceTcpDataQueue,
 		p.TraceTcpPushPendingFrames,
 		p.TraceTcpRecvmsg,
