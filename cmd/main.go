@@ -7,7 +7,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"os/signal"
@@ -170,11 +169,9 @@ func processRecord(record ringbuf.Record, hTracker *htrack.HTrack) error {
 			meta.Tuple.Saddr, meta.Tuple.Daddr,
 			meta.Tuple.Sport, meta.Tuple.Dport)
 	} else {
-		// 回退到原有的PID+TID方案
+		// 回退到原有的PID+TID+SSLPtr方案
 		sessionID = fmt.Sprintf("%d-%d-%d", meta.Pid, meta.Tid, meta.SslPtr)
 	}
-
-	fmt.Println(rawData)
 
 	packetInfo := buildPacketInfo(&meta, rawData)
 	if err := hTracker.ProcessPacket(sessionID, packetInfo); err != nil {
@@ -258,7 +255,7 @@ func parseCmdArgs() {
 
 	// 从文件读取PID列表
 	if *pidFile != "" {
-		if data, err := ioutil.ReadFile(*pidFile); err == nil {
+		if data, err := os.ReadFile(*pidFile); err == nil {
 			for _, line := range strings.Split(string(data), "\n") {
 				line = strings.TrimSpace(line)
 				// 跳过空行和注释行

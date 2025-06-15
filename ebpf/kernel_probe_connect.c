@@ -27,8 +27,27 @@ static int kretprobe_connect(struct pt_regs* ctx, __u32 fd, struct sock *sk, boo
         saddr = (__be32)(addrs >> 32);
         daddr = (__be32)addrs;
     } else if (address_family == 10) { // AF_INET6 = 10
-        // IPv6支持可以后续添加
-        return 0;
+        // 检查是否为IPv6映射的IPv4地址 (::ffff:x.x.x.x)
+        struct in6_addr v6_saddr, v6_daddr;
+        bpf_probe_read_kernel(&v6_saddr, sizeof(v6_saddr), &sk->__sk_common.skc_v6_rcv_saddr);
+        bpf_probe_read_kernel(&v6_daddr, sizeof(v6_daddr), &sk->__sk_common.skc_v6_daddr);
+        
+        // 检查源地址是否为IPv4映射地址 (前96位为0或::ffff:)
+        bool is_v4_mapped_src = (v6_saddr.in6_u.u6_addr32[0] == 0 && v6_saddr.in6_u.u6_addr32[1] == 0 && 
+                                (v6_saddr.in6_u.u6_addr32[2] == 0 || v6_saddr.in6_u.u6_addr32[2] == bpf_htonl(0x0000ffff)));
+        bool is_v4_mapped_dst = (v6_daddr.in6_u.u6_addr32[0] == 0 && v6_daddr.in6_u.u6_addr32[1] == 0 && 
+                                (v6_daddr.in6_u.u6_addr32[2] == 0 || v6_daddr.in6_u.u6_addr32[2] == bpf_htonl(0x0000ffff)));
+        
+        if (is_v4_mapped_src && is_v4_mapped_dst) {
+            // 提取IPv4地址（在最后32位）
+            saddr = v6_saddr.in6_u.u6_addr32[3];
+            daddr = v6_daddr.in6_u.u6_addr32[3];
+            DEBUG_PRINT("DEBUG: IPv6-mapped IPv4 addresses - saddr: %u, daddr: %u", saddr, daddr);
+        } else {
+            // 纯IPv6地址，暂不支持
+            DEBUG_PRINT("DEBUG: Pure IPv6 address, not supported yet");
+            return 0;
+        }
     } else {
         return 0;
     }
