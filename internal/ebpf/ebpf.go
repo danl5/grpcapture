@@ -1,15 +1,16 @@
-package main
+package ebpf
 
 import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
+
+	"github.com/danl5/grpcapture/internal/logger"
 )
 
 // TCP四元组结构体 - 手动控制字段顺序和对齐
@@ -23,7 +24,7 @@ type tcpTuple struct {
 }
 
 // TLS元数据结构体
-type tlsMeta struct {
+type TlsMeta struct {
 	Timestamp  uint64    // timestamp_ns (8字节)
 	Pid        uint32    // pid (4字节)
 	Tid        uint32    // tid (4字节)
@@ -38,13 +39,40 @@ type tlsMeta struct {
 	// 总计: 8+4+4+4+1+1+2+16+8+8+14 = 70字节
 }
 
-type tlsTlsEvent struct {
-	Meta tlsMeta
+type TlsTlsEvent struct {
+	Meta TlsMeta
 	Data [16384]uint8
 }
 
-// eBPFSetup 结构体优化
-type eBPFSetup struct {
+// SSL设置FD事件结构体
+type SslSetFdEvent struct {
+	Timestamp uint64   // timestamp_ns (8字节)
+	Pid       uint32   // pid (4字节)
+	Tid       uint32   // tid (4字节)
+	SslPtr    uint64   // ssl_ptr (8字节)
+	Fd        uint32   // fd (4字节)
+	Pad       [4]uint8 // pad[4] (4字节对齐)
+}
+
+// 连接事件结构体
+type ConnectEvent struct {
+	Timestamp uint64    // timestamp_ns (8字节)
+	Pid       uint32    // pid (4字节)
+	Tid       uint64    // tid (8字节)
+	Fd        uint32    // fd (4字节)
+	Family    uint16    // family (2字节)
+	Sport     uint16    // sport (2字节)
+	Dport     uint16    // dport (2字节)
+	Saddr     uint32    // saddr (4字节)
+	Daddr     uint32    // daddr (4字节)
+	Comm      [16]uint8 // comm[16] (16字节)
+	Sock      uint64    // sock (8字节)
+	IsDestroy uint8     // is_destroy (1字节)
+	Pad       [7]uint8  // pad[7] (7字节对齐)
+}
+
+// EBPFSetup 结构体优化
+type EBPFSetup struct {
 	coll          *ebpf.Collection
 	rd            *ringbuf.Reader
 	writeProbe    link.Link
@@ -60,35 +88,44 @@ type eBPFSetup struct {
 	filterConfig *ebpf.Map
 }
 
+// Getter 方法
+func (e *EBPFSetup) GetCollection() *ebpf.Collection {
+	return e.coll
+}
+
+func (e *EBPFSetup) GetRingBuffer() *ringbuf.Reader {
+	return e.rd
+}
+
 // PID过滤管理方法
 
 // 启用PID过滤
-func (e *eBPFSetup) EnablePIDFilter() error {
+func (e *EBPFSetup) EnablePIDFilter() error {
 	key := uint32(0)
 	value := uint8(1)
 	return e.filterConfig.Update(key, value, ebpf.UpdateAny)
 }
 
 // 禁用PID过滤
-func (e *eBPFSetup) DisablePIDFilter() error {
+func (e *EBPFSetup) DisablePIDFilter() error {
 	key := uint32(0)
 	value := uint8(0)
 	return e.filterConfig.Update(key, value, ebpf.UpdateAny)
 }
 
 // 添加允许的PID
-func (e *eBPFSetup) AddPID(pid uint32) error {
+func (e *EBPFSetup) AddPID(pid uint32) error {
 	value := uint8(1)
 	return e.pidFilter.Update(pid, value, ebpf.UpdateAny)
 }
 
 // 移除PID
-func (e *eBPFSetup) RemovePID(pid uint32) error {
+func (e *EBPFSetup) RemovePID(pid uint32) error {
 	return e.pidFilter.Delete(pid)
 }
 
 // 批量添加PID
-func (e *eBPFSetup) AddPIDs(pids []uint32) error {
+func (e *EBPFSetup) AddPIDs(pids []uint32) error {
 	for _, pid := range pids {
 		if err := e.AddPID(pid); err != nil {
 			return fmt.Errorf("failed to add PID %d: %v", pid, err)
@@ -97,34 +134,47 @@ func (e *eBPFSetup) AddPIDs(pids []uint32) error {
 	return nil
 }
 
+// 设置PID过滤器
+func (e *EBPFSetup) SetPIDFilter(pids []uint32) error {
+	if len(pids) == 0 {
+		return e.DisablePIDFilter()
+	}
+
+	if err := e.EnablePIDFilter(); err != nil {
+		return fmt.Errorf("failed to enable PID filter: %v", err)
+	}
+
+	return e.AddPIDs(pids)
+}
+
 // Close 方法优化
-func (e *eBPFSetup) Close() {
+func (e *EBPFSetup) Close() {
 	// 关闭uprobe链接
 	if e.writeProbe != nil {
 		if err := e.writeProbe.Close(); err != nil {
-			log.Printf("Error closing writeProbe: %v", err)
+			logger.Error("Error closing writeProbe: %v", err)
 		}
 	}
 	if e.readProbe != nil {
 		if err := e.readProbe.Close(); err != nil {
-			log.Printf("Error closing readProbe: %v", err)
+			logger.Error("Error closing readProbe: %v", err)
 		}
 	}
 	if e.writeRetProbe != nil {
 		if err := e.writeRetProbe.Close(); err != nil {
-			log.Printf("Error closing writeRetProbe: %v", err)
+			logger.Error("Error closing writeRetProbe: %v", err)
 		}
 	}
 	if e.readRetProbe != nil {
 		if err := e.readRetProbe.Close(); err != nil {
-			log.Printf("Error closing readRetProbe: %v", err)
+			logger.Error("Error closing readRetProbe: %v", err)
 		}
 	}
 
 	// 关闭ringbuf reader
 	if e.rd != nil {
 		if err := e.rd.Close(); err != nil {
-			log.Printf("Error closing ringbuf reader: %v", err)
+			logger.Error("Error closing ringbuf reader: %v", err)
 		}
 	}
 
@@ -132,7 +182,7 @@ func (e *eBPFSetup) Close() {
 	for _, tpLink := range e.tracepointLinks {
 		if tpLink != nil {
 			if err := tpLink.Close(); err != nil {
-				log.Printf("Error closing tracepoint link: %v", err)
+				logger.Error("Error closing tracepoint link: %v", err)
 			}
 		}
 	}
@@ -141,7 +191,7 @@ func (e *eBPFSetup) Close() {
 	for _, kpLink := range e.kprobeLinks {
 		if kpLink != nil {
 			if err := kpLink.Close(); err != nil {
-				log.Printf("Error closing kprobe link: %v", err)
+				logger.Error("Error closing kprobe link: %v", err)
 			}
 		}
 	}
@@ -179,7 +229,7 @@ func isOptionalProbe(probeName string) bool {
 	return false
 }
 
-func setupBpf(soFilePath string) (*eBPFSetup, error) {
+func Setup(soFilePath string) (*EBPFSetup, error) {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return nil, fmt.Errorf("failed to remove memory limit: %v", err)
 	}
@@ -207,7 +257,7 @@ func setupBpf(soFilePath string) (*eBPFSetup, error) {
 		return nil, fmt.Errorf("failed to open executable: %v", err)
 	}
 
-	setup := &eBPFSetup{coll: coll}
+	setup := &EBPFSetup{coll: coll}
 
 	// 定义挂载点配置结构
 	type attachConfig struct {
@@ -270,7 +320,7 @@ func setupBpf(soFilePath string) (*eBPFSetup, error) {
 	for _, config := range attachConfigs {
 		prog, exists := coll.Programs[config.programName]
 		if !exists {
-			log.Printf("Warning: program %s not found", config.programName)
+			logger.Warn("Warning: program %s not found", config.programName)
 			continue
 		}
 
@@ -288,14 +338,14 @@ func setupBpf(soFilePath string) (*eBPFSetup, error) {
 		case "kretprobe":
 			attachLink, err = link.Kretprobe(config.name, prog, nil)
 		default:
-			log.Printf("Warning: unknown attach type %s for %s", config.attachType, config.name)
+			logger.Warn("Warning: unknown attach type %s for %s", config.attachType, config.name)
 			continue
 		}
 
 		if err != nil {
 			// 对于可选的探针（如 GnuTLS, BoringSSL, Go TLS），只记录警告而不退出
 			if isOptionalProbe(config.name) {
-				log.Printf("Warning: failed to attach optional %s %s: %v", config.attachType, config.name, err)
+				logger.Warn("Warning: failed to attach optional %s %s: %v", config.attachType, config.name, err)
 				continue
 			}
 			setup.Close()
@@ -315,7 +365,7 @@ func setupBpf(soFilePath string) (*eBPFSetup, error) {
 			}
 		}
 
-		log.Printf("Successfully attached %s: %s", config.attachType, config.name)
+		logger.Debug("Successfully attached %s: %s", config.attachType, config.name)
 	}
 
 	// 创建ringbuf reader
@@ -336,7 +386,7 @@ func setupBpf(soFilePath string) (*eBPFSetup, error) {
 	return setup, nil
 }
 
-func readEventRecords(ctx context.Context, rd *ringbuf.Reader) chan ringbuf.Record {
+func ReadEventRecords(ctx context.Context, rd *ringbuf.Reader) chan ringbuf.Record {
 	eventCh := make(chan ringbuf.Record, 100)
 
 	go func() {
@@ -349,10 +399,10 @@ func readEventRecords(ctx context.Context, rd *ringbuf.Reader) chan ringbuf.Reco
 				record, err := rd.Read()
 				if err != nil {
 					if errors.Is(err, ringbuf.ErrClosed) {
-						log.Println("Ringbuf reader closed")
+						logger.Debug("Ringbuf reader closed")
 						return
 					}
-					log.Printf("Reading from ringbuf failed: %v", err)
+					logger.Error("Reading from ringbuf failed: %v", err)
 					continue
 				}
 				eventCh <- record

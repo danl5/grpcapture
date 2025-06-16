@@ -29,14 +29,7 @@ int kprobe_sock_sendmsg(struct pt_regs *ctx) {
         return 0;
     }
     
-    __u64 *ssl_ptr = bpf_map_lookup_elem(&current_ssl_ptr, &pid_tgid);
-    if (ssl_ptr) {
-        struct ssl_conn_key key = {
-            .pid_tgid = pid_tgid,
-            .ssl_ptr = *ssl_ptr
-        };
-        bpf_map_update_elem(&sock_storage, &key, &sk, BPF_ANY);
-    }
+    // current_ssl_ptr和sock_storage映射已移除，功能移至用户态
     
     return 0;
 }
@@ -67,14 +60,7 @@ int kprobe_sock_recvmsg(struct pt_regs *ctx) {
         return 0;
     }
     
-    __u64 *ssl_ptr = bpf_map_lookup_elem(&current_ssl_ptr, &pid_tgid);
-    if (ssl_ptr) {
-        struct ssl_conn_key key = {
-            .pid_tgid = pid_tgid,
-            .ssl_ptr = *ssl_ptr
-        };
-        bpf_map_update_elem(&sock_storage, &key, &sk, BPF_ANY);
-    }
+    // current_ssl_ptr和sock_storage映射已移除，功能移至用户态
     
     return 0;
 }
@@ -99,14 +85,7 @@ int trace_tcp_sendmsg(struct pt_regs *ctx) {
         return 0;
     }
     
-    __u64 *ssl_ptr = bpf_map_lookup_elem(&current_ssl_ptr, &pid_tgid);
-    if (ssl_ptr) {
-        struct ssl_conn_key key = {
-            .pid_tgid = pid_tgid,
-            .ssl_ptr = *ssl_ptr
-        };
-        bpf_map_update_elem(&sock_storage, &key, &sk, BPF_ANY);
-    }
+    // current_ssl_ptr和sock_storage映射已移除，功能移至用户态
     
     return 0;
 }
@@ -131,14 +110,7 @@ int trace_tcp_recvmsg(struct pt_regs *ctx) {
         return 0;
     }
     
-    __u64 *ssl_ptr = bpf_map_lookup_elem(&current_ssl_ptr, &pid_tgid);
-    if (ssl_ptr) {
-        struct ssl_conn_key key = {
-            .pid_tgid = pid_tgid,
-            .ssl_ptr = *ssl_ptr
-        };
-        bpf_map_update_elem(&sock_storage, &key, &sk, BPF_ANY);
-    }
+    // current_ssl_ptr和sock_storage映射已移除，功能移至用户态
     
     return 0;
 }
@@ -163,14 +135,7 @@ int trace_tcp_data_queue(struct pt_regs *ctx) {
         return 0;
     }
     
-    __u64 *ssl_ptr = bpf_map_lookup_elem(&current_ssl_ptr, &pid_tgid);
-    if (ssl_ptr) {
-        struct ssl_conn_key key = {
-            .pid_tgid = pid_tgid,
-            .ssl_ptr = *ssl_ptr
-        };
-        bpf_map_update_elem(&sock_storage, &key, &sk, BPF_ANY);
-    }
+    // current_ssl_ptr和sock_storage映射已移除，功能移至用户态
     
     return 0;
 }
@@ -195,14 +160,7 @@ int trace_tcp_write_xmit(struct pt_regs *ctx) {
         return 0;
     }
     
-    __u64 *ssl_ptr = bpf_map_lookup_elem(&current_ssl_ptr, &pid_tgid);
-    if (ssl_ptr) {
-        struct ssl_conn_key key = {
-            .pid_tgid = pid_tgid,
-            .ssl_ptr = *ssl_ptr
-        };
-        bpf_map_update_elem(&sock_storage, &key, &sk, BPF_ANY);
-    }
+    // current_ssl_ptr和sock_storage映射已移除，功能移至用户态
     
     return 0;
 }
@@ -227,15 +185,8 @@ int trace_tcp_push_pending_frames(struct pt_regs *ctx) {
         return 0;
     }
     
-    __u64 *ssl_ptr = bpf_map_lookup_elem(&current_ssl_ptr, &pid_tgid);
-    if (ssl_ptr) {
-        struct ssl_conn_key key = {
-            .pid_tgid = pid_tgid,
-            .ssl_ptr = *ssl_ptr
-        };
-        bpf_map_update_elem(&sock_storage, &key, &sk, BPF_ANY);
-    }
-    
+    // current_ssl_ptr和sock_storage映射已移除，功能移至用户态
+
     return 0;
 }
 

@@ -36,10 +36,10 @@ endif
 generate: vmlinux
 	@echo "Generating eBPF Go bindings for $(TARGET) architecture..."
 	go run github.com/cilium/ebpf/cmd/bpf2go \
-	    -go-package main \
+	    -go-package ebpf \
 		-cc clang \
 		-target $(TARGET) \
-		-output-dir cmd \
+		-output-dir internal/ebpf \
 		-cflags "$(DEBUG_FLAGS) -gdwarf-4 -Wall $(ARCH_FLAGS) -I./ebpf -D__USE_ATTRIBUTES__ -target bpf -D__BPF_TRACING__ -Wno-unused-value -Wno-pointer-sign -Wno-compare-distinct-pointer-types -Wno-gnu-variable-sized-type-not-at-end -Wno-address-of-packed-member -Wno-tautological-compare -Wno-unknown-warning-option" \
 		tls ./ebpf/tls_probe.c
 
@@ -47,7 +47,7 @@ build: generate
 	go build -o grpcapture ./cmd/
 
 clean:
-	rm -f cmd/tls_x86*.go cmd/tls_x86*.o
+	rm -f internal/ebpf/tls_x86*.go internal/ebpf/tls_x86*.o
 	rm -f grpcapture
 
 clean-all: clean

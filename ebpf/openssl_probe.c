@@ -154,16 +154,11 @@ int probe_entry_ssl_write(struct pt_regs *ctx) {
     u32 fd = (u32)ssl_wbio_num_addr;
     DEBUG_PRINT("[LAYER2] SSL_write: SSL=%p, BIO_fd=%u", ssl, fd);
     
+    // 移除内核态映射查询逻辑，改为在TLS事件中包含SSL指针
+    // 用户态将通过事件分发器查询映射关系
     if (fd == 0) {
-        u64 ssl_addr = (u64)ssl;
-        DEBUG_PRINT("[LAYER2] BIO_fd=0, looking up ssl_st_fd map for SSL=%p", ssl);
-        u64 *fd_ptr = bpf_map_lookup_elem(&ssl_st_fd, &ssl_addr);
-        if (fd_ptr) {
-            fd = (u64)*fd_ptr;
-            DEBUG_PRINT("[LAYER2] SUCCESS: Found FD=%u for SSL=%p in ssl_st_fd map", fd, ssl);
-        } else {
-            DEBUG_PRINT("[LAYER2] FAILED: No FD found for SSL=%p in ssl_st_fd map", ssl);
-        }
+        DEBUG_PRINT("[LAYER2] BIO_fd=0, will include SSL pointer in TLS event for user-space mapping");
+        // fd保持为0，用户态将通过SSL指针查询映射
     }
     
     DEBUG_PRINT("openssl uprobe/SSL_write final fd: %d, version: %d", fd, ssl_version);
@@ -255,16 +250,11 @@ int probe_entry_ssl_read(struct pt_regs *ctx) {
     u32 fd = (u32)ssl_rbio_num_addr;
     DEBUG_PRINT("[LAYER2] SSL_read: SSL=%p, BIO_fd=%u", ssl, fd);
     
+    // 移除内核态映射查询逻辑，改为在TLS事件中包含SSL指针
+    // 用户态将通过事件分发器查询映射关系
     if (fd == 0) {
-        u64 ssl_addr = (u64)ssl;
-        DEBUG_PRINT("[LAYER2] BIO_fd=0, looking up ssl_st_fd map for SSL=%p", ssl);
-        u64 *fd_ptr = bpf_map_lookup_elem(&ssl_st_fd, &ssl_addr);
-        if (fd_ptr) {
-            fd = (u64)*fd_ptr;
-            DEBUG_PRINT("[LAYER2] SUCCESS: Found FD=%u for SSL=%p in ssl_st_fd map", fd, ssl);
-        } else {
-            DEBUG_PRINT("[LAYER2] FAILED: No FD found for SSL=%p in ssl_st_fd map", ssl);
-        }
+        DEBUG_PRINT("[LAYER2] BIO_fd=0, will include SSL pointer in TLS event for user-space mapping");
+        // fd保持为0，用户态将通过SSL指针查询映射
     }
     
     DEBUG_PRINT("openssl uprobe/SSL_read final fd: %d, version: %d", fd, ssl_version);
@@ -326,14 +316,25 @@ SEC("uprobe/SSL_set_fd")
 int probe_SSL_set_fd(struct pt_regs* ctx) {
     u64 ssl_addr = (u64)PT_REGS_PARM1(ctx);
     u64 fd = (u64)PT_REGS_PARM2(ctx);
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 pid = pid_tgid >> 32;
+    u32 tid = (u32)pid_tgid;
     
-    DEBUG_PRINT("[LAYER1] SSL_set_fd called: SSL=%p, FD=%u, PID=%u", (void*)ssl_addr, (u32)fd, (u32)(bpf_get_current_pid_tgid() >> 32));
+    DEBUG_PRINT("[LAYER1] SSL_set_fd called: SSL=%p, FD=%u, PID=%u", (void*)ssl_addr, (u32)fd, pid);
     
-    int ret = bpf_map_update_elem(&ssl_st_fd, &ssl_addr, &fd, BPF_ANY);
-    if (ret == 0) {
-        DEBUG_PRINT("[LAYER1] SUCCESS: SSL->FD mapping stored: SSL=%p -> FD=%u", (void*)ssl_addr, (u32)fd);
+    // 发送SSL设置FD事件到用户态（移除内核态映射逻辑）
+    struct ssl_set_fd_event *event = bpf_ringbuf_reserve(&ssl_set_fd_events, sizeof(struct ssl_set_fd_event), 0);
+    if (event) {
+        event->timestamp_ns = bpf_ktime_get_ns();
+        event->pid = pid;
+        event->tid = tid;
+        event->ssl_ptr = ssl_addr;
+        event->fd = (u32)fd;
+        
+        bpf_ringbuf_submit(event, 0);
+        DEBUG_PRINT("[LAYER1] SSL set FD event sent: PID=%u, TID=%u, SSL=%p, FD=%u", pid, tid, (void*)ssl_addr, (u32)fd);
     } else {
-        DEBUG_PRINT("[LAYER1] FAILED: Could not store SSL->FD mapping, ret=%d", ret);
+        DEBUG_PRINT("[LAYER1] Failed to reserve ringbuf for SSL set FD event");
     }
     
     return 0;

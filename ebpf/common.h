@@ -65,12 +65,7 @@ struct tls_event {
     __u8 data[MAX_DATA_SIZE];
 } __attribute__((packed));
 
-// 参数缓存结构
-struct ssl_args {
-    const void *ssl;
-    const void *buf;
-    int num;
-} __attribute__((packed));
+// ssl_args结构体已移除，未被使用
 
 // SSL连接标识结构体 - 用作更精确的key
 struct ssl_conn_key {
@@ -115,6 +110,16 @@ struct connect_event_t {
     __u64 sock;
     __u8 is_destroy;      // 是否为连接销毁事件
     __u8 pad[7];          // 对齐填充
+};
+
+// SSL设置FD事件结构
+struct ssl_set_fd_event {
+    __u64 timestamp_ns;
+    __u32 pid;
+    __u32 tid;
+    __u64 ssl_ptr;
+    __u32 fd;
+    __u8 pad[4];          // 对齐填充
 };
 
 // PID过滤函数
