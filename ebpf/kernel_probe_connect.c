@@ -85,12 +85,9 @@ static int kretprobe_connect(struct pt_regs* ctx, __u32 fd, struct sock *sk, boo
     
     int ret = bpf_map_update_elem(&tcp_fd_infos, &fd, &conn_info, BPF_ANY);
     if (ret == 0) {
-        DEBUG_PRINT("[LAYER0] SUCCESS: Stored TCP info for FD=%u: %u.%u.%u.%u:%u -> %u.%u.%u.%u:%u",
-                    fd,
-                    (conn_info.saddr >> 24) & 0xFF, (conn_info.saddr >> 16) & 0xFF,
-                    (conn_info.saddr >> 8) & 0xFF, conn_info.saddr & 0xFF, conn_info.sport,
-                    (conn_info.daddr >> 24) & 0xFF, (conn_info.daddr >> 16) & 0xFF,
-                    (conn_info.daddr >> 8) & 0xFF, conn_info.daddr & 0xFF, conn_info.dport);
+        DEBUG_PRINT("[LAYER0] SUCCESS: Stored TCP info for FD=%u", fd);
+        DEBUG_PRINT("[LAYER0] SRC: %x:%u", conn_info.saddr, conn_info.sport);
+        DEBUG_PRINT("[LAYER0] DST: %x:%u", conn_info.daddr, conn_info.dport);
     } else {
         DEBUG_PRINT("[LAYER0] FAILED: Could not store TCP info for FD=%u, ret=%d", fd, ret);
     }

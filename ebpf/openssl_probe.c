@@ -31,7 +31,7 @@ struct ssl_data_args {
 // 处理SSL数据
 static int process_SSL_data(struct pt_regs* ctx, u64 id, struct ssl_data_args* args) {
     int len = (int)PT_REGS_RC(ctx);
-    if (len < 0) {
+    if (len <= 0) {
         return 0;
     }
 
@@ -40,7 +40,15 @@ static int process_SSL_data(struct pt_regs* ctx, u64 id, struct ssl_data_args* a
         return 0;
     }
 
-    u32 data_len = (len > MAX_DATA_SIZE) ? MAX_DATA_SIZE : (u32)len;
+    // 确保 data_len 为正数且在合理范围内
+    u32 data_len = 0;
+    if (len > 0 && len <= MAX_DATA_SIZE) {
+        data_len = (u32)len;
+    } else if (len > MAX_DATA_SIZE) {
+        data_len = MAX_DATA_SIZE;
+    } else {
+        return 0; // 不应该到达这里，但为了安全起见
+    }
     
     // 使用ringbuf分配事件
     struct tls_event *e = bpf_ringbuf_reserve(&tls_events, sizeof(struct tls_event), 0);
@@ -66,17 +74,14 @@ static int process_SSL_data(struct pt_regs* ctx, u64 id, struct ssl_data_args* a
     // 不再在eBPF层填充tuple信息
 
     // 复制数据
-    if (data_len > 0 && args->buf) {
-        long res = bpf_probe_read_user(e->data, data_len, args->buf);
+    if (data_len > 0 && data_len <= MAX_DATA_SIZE && args->buf) {
+        long res = bpf_probe_read_user(e->data, data_len & (MAX_DATA_SIZE - 1), args->buf);
         e->meta.data_len = (res >= 0) ? data_len : 0;
         
-        // Debug: 打印data的前八个字符
-        if (res >= 0 && data_len >= 8) {
-            DEBUG_PRINT("[DEBUG] Data first 8 bytes: %02x %02x %02x %02x %02x %02x %02x %02x",
-                       (unsigned char)e->data[0], (unsigned char)e->data[1],
-                       (unsigned char)e->data[2], (unsigned char)e->data[3],
-                       (unsigned char)e->data[4], (unsigned char)e->data[5],
-                       (unsigned char)e->data[6], (unsigned char)e->data[7]);
+        // Debug: 打印data的前两个字节
+        if (res >= 0 && data_len >= 2) {
+            DEBUG_PRINT("[DEBUG] Data first 2 bytes: %02x %02x",
+                       (unsigned char)e->data[0], (unsigned char)e->data[1]);
         } else if (res >= 0 && data_len > 0) {
             DEBUG_PRINT("[DEBUG] Data length %d < 8, showing available bytes:", data_len);
             for (int i = 0; i < data_len && i < 8; i++) {
@@ -316,7 +321,7 @@ int probe_SSL_set_fd(struct pt_regs* ctx) {
         event->fd = (u32)fd;
         
         bpf_ringbuf_submit(event, 0);
-        DEBUG_PRINT("[LAYER1] SSL set FD event sent: PID=%u, TID=%u, SSL=%p, FD=%u", pid, tid, (void*)ssl_addr, (u32)fd);
+        DEBUG_PRINT("[LAYER1] SSL set FD event sent: PID=%u, FD=%u", pid, (u32)fd);
     } else {
         DEBUG_PRINT("[LAYER1] Failed to reserve ringbuf for SSL set FD event");
     }

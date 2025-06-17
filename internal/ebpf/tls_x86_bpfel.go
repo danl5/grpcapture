@@ -57,6 +57,7 @@ type tlsProgramSpecs struct {
 	KprobeDevQueueXmit         *ebpf.ProgramSpec `ebpf:"kprobe_dev_queue_xmit"`
 	KprobeSockRecvmsg          *ebpf.ProgramSpec `ebpf:"kprobe_sock_recvmsg"`
 	KprobeSockSendmsg          *ebpf.ProgramSpec `ebpf:"kprobe_sock_sendmsg"`
+	ProbeSSL_setBio            *ebpf.ProgramSpec `ebpf:"probe_SSL_set_bio"`
 	ProbeSSL_setFd             *ebpf.ProgramSpec `ebpf:"probe_SSL_set_fd"`
 	ProbeSSL_setRfd            *ebpf.ProgramSpec `ebpf:"probe_SSL_set_rfd"`
 	ProbeSSL_setWfd            *ebpf.ProgramSpec `ebpf:"probe_SSL_set_wfd"`
@@ -194,6 +195,7 @@ type tlsPrograms struct {
 	KprobeDevQueueXmit         *ebpf.Program `ebpf:"kprobe_dev_queue_xmit"`
 	KprobeSockRecvmsg          *ebpf.Program `ebpf:"kprobe_sock_recvmsg"`
 	KprobeSockSendmsg          *ebpf.Program `ebpf:"kprobe_sock_sendmsg"`
+	ProbeSSL_setBio            *ebpf.Program `ebpf:"probe_SSL_set_bio"`
 	ProbeSSL_setFd             *ebpf.Program `ebpf:"probe_SSL_set_fd"`
 	ProbeSSL_setRfd            *ebpf.Program `ebpf:"probe_SSL_set_rfd"`
 	ProbeSSL_setWfd            *ebpf.Program `ebpf:"probe_SSL_set_wfd"`
@@ -240,6 +242,7 @@ func (p *tlsPrograms) Close() error {
 		p.KprobeDevQueueXmit,
 		p.KprobeSockRecvmsg,
 		p.KprobeSockSendmsg,
+		p.ProbeSSL_setBio,
 		p.ProbeSSL_setFd,
 		p.ProbeSSL_setRfd,
 		p.ProbeSSL_setWfd,
