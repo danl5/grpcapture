@@ -14,7 +14,7 @@ type Config struct {
 	TargetPIDs []uint32
 	SOFile     string
 	HexOutput  bool
-	Verbose    bool
+	Debug      bool
 }
 
 // ParseFlags 解析命令行参数
@@ -24,14 +24,14 @@ func ParseFlags() *Config {
 	var pidFile = flag.String("pid-file", "", "File containing PIDs to monitor (one per line)")
 	var soFile = flag.String("so-file", "/usr/lib/x86_64-linux-gnu/libssl.so.3", "Path to the SSL library file to monitor")
 	var hexOutput = flag.Bool("hex", false, "Output body data in hexadecimal format")
-	var verbose = flag.Bool("verbose", false, "Enable verbose logging")
+	var debug = flag.Bool("debug", false, "Enable debug logging")
 
 	flag.Parse()
 
 	config := &Config{
 		SOFile:    *soFile,
 		HexOutput: *hexOutput,
-		Verbose:   *verbose,
+		Debug:     *debug,
 	}
 
 	// 解析PID参数

@@ -62,6 +62,28 @@ void print_ssl_structure_info(SSL *ssl) {
         }
     }
     
+    // 计算wbio在SSL结构体中的偏移量
+    if (wbio) {
+        for (int offset = 0; offset < 0x200; offset += 8) {
+            void **ptr = (void**)((char*)ssl + offset);
+            if (*ptr == wbio) {
+                printf("wbio found at SSL offset 0x%02x\n", offset);
+                break;
+            }
+        }
+    }
+    
+    // 检查SSL结构体开头的版本信息
+    printf("\n=== SSL Version Field Analysis ===\n");
+    int *version_ptr = (int*)ssl;
+    printf("SSL version field at offset 0x0: 0x%x\n", *version_ptr);
+    
+    // 检查SSL结构体前几个字段的值
+    for (int offset = 0; offset < 0x20; offset += 4) {
+        int *ptr = (int*)((char*)ssl + offset);
+        printf("SSL offset 0x%02x: 0x%x (%d)\n", offset, *ptr, *ptr);
+    }
+    
     // 搜索SSL结构体中可能的socket文件描述符
     printf("\n=== Searching for Socket FD in SSL structure ===\n");
     for (int offset = 0; offset < 0x300; offset += 4) {

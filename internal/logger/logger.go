@@ -7,14 +7,14 @@ import (
 
 // Logger 全局日志实例
 var (
-	Verbose bool = false
+	DebugMode bool = false
 	stdLogger = log.New(os.Stdout, "", log.LstdFlags)
 	errLogger = log.New(os.Stderr, "", log.LstdFlags)
 )
 
-// SetVerbose 设置详细日志模式
-func SetVerbose(verbose bool) {
-	Verbose = verbose
+// SetDebug 设置调试日志模式
+func SetDebug(debug bool) {
+	DebugMode = debug
 }
 
 // Info 输出信息日志
@@ -38,16 +38,16 @@ func Fatal(format string, args ...interface{}) {
 	os.Exit(1)
 }
 
-// Debug 输出调试日志（仅在 verbose 模式下）
+// Debug 输出调试日志（仅在 debug 模式下）
 func Debug(format string, args ...interface{}) {
-	if Verbose {
+	if DebugMode {
 		stdLogger.Printf("[DEBUG] "+format, args...)
 	}
 }
 
-// Verbose 输出详细日志（仅在 verbose 模式下）
+// VerboseLog 输出详细日志（仅在 debug 模式下）
 func VerboseLog(format string, args ...interface{}) {
-	if Verbose {
+	if DebugMode {
 		stdLogger.Printf("[VERBOSE] "+format, args...)
 	}
 }

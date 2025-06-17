@@ -30,7 +30,7 @@ func main() {
 	sslLibPath := cfg.SOFile
 
 	// 设置日志模式
-	logger.SetVerbose(cfg.Verbose)
+	logger.SetDebug(cfg.Debug)
 
 	// 初始化格式化器
 	var bodyFormat formatter.OutputFormat
@@ -261,17 +261,37 @@ func processConnectRecord(record ringbuf.Record, dispatcher *events.EventDispatc
 	return nil
 }
 
-// HTTP数据处理协程（重构版）
-func processHTTPDataRefactored(ctx context.Context, hTracker *htrack.HTrack, packetCh <-chan *types.PacketInfo, formatter *formatter.DefaultFormatter) {
+// HTTP数据处理协程
+func processHTTPDataRefactored(
+	ctx context.Context,
+	hTracker *htrack.HTrack,
+	packetCh <-chan *types.PacketInfo,
+	formatter *formatter.DefaultFormatter) {
+
+	buildConnID := func(packetInfo *types.PacketInfo) string {
+		if packetInfo.TCPTuple == nil || packetInfo.TCPTuple.SrcIP == "" || packetInfo.TCPTuple.DstIP == "" {
+			return fmt.Sprintf("%s-%d-%d", packetInfo.ProcessName, packetInfo.PID, packetInfo.TID)
+		}
+		srcAddr := fmt.Sprintf("%s:%d", net.IP(packetInfo.TCPTuple.SrcIP[:]).String(), packetInfo.TCPTuple.SrcPort)
+		dstAddr := fmt.Sprintf("%s:%d", net.IP(packetInfo.TCPTuple.DstIP[:]).String(), packetInfo.TCPTuple.DstPort)
+
+		// 按字典序排序，确保相同连接生成相同ID
+		var connID string
+		if srcAddr < dstAddr {
+			connID = fmt.Sprintf("%s-%d-%s-%s", packetInfo.ProcessName, packetInfo.PID, srcAddr, dstAddr)
+		} else {
+			connID = fmt.Sprintf("%s-%d-%s-%s", packetInfo.ProcessName, packetInfo.PID, dstAddr, srcAddr)
+		}
+		return connID
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case packetInfo := <-packetCh:
-			// 处理数据包
-			connID := fmt.Sprintf("%s:%d-%s:%d",
-				net.IP(packetInfo.TCPTuple.SrcIP[:]).String(), packetInfo.TCPTuple.SrcPort,
-				net.IP(packetInfo.TCPTuple.DstIP[:]).String(), packetInfo.TCPTuple.DstPort)
+			connID := buildConnID(packetInfo)
+			logger.Debug("connID: %s", connID)
 			if err := hTracker.ProcessPacket(connID, packetInfo); err != nil {
 				logger.Debug("Parse data failed: %v", err)
 				continue
@@ -283,18 +303,14 @@ func processHTTPDataRefactored(ctx context.Context, hTracker *htrack.HTrack, pac
 				switch {
 				case req.Proto == "TLS/Other":
 					fmt.Print(formatter.FormatTLSData(req, nil))
-				case strings.HasPrefix(req.Proto, "HTTP/1.0"),
-					strings.HasPrefix(req.Proto, "HTTP/1.1"),
-					strings.HasPrefix(req.Proto, "HTTP/2"):
+				case strings.HasPrefix(req.Proto, "HTTP"):
 					fmt.Print(formatter.FormatHTTPData(req, nil))
 				}
 			case resp := <-hTracker.GetResponseChan():
 				switch {
 				case resp.Proto == "TLS/Other":
 					fmt.Print(formatter.FormatTLSData(nil, resp))
-				case strings.HasPrefix(resp.Proto, "HTTP/1.0"),
-					strings.HasPrefix(resp.Proto, "HTTP/1.1"),
-					strings.HasPrefix(resp.Proto, "HTTP/2"):
+				case strings.HasPrefix(resp.Proto, "HTTP"):
 					fmt.Print(formatter.FormatHTTPData(nil, resp))
 				}
 			default:
@@ -304,7 +320,7 @@ func processHTTPDataRefactored(ctx context.Context, hTracker *htrack.HTrack, pac
 	}
 }
 
-// 打印统计信息（重构版）
+// 打印统计信息
 func printStatsRefactored(ctx context.Context, dispatcher *events.EventDispatcher, mappingManager *mapping.MappingManager) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()

@@ -9,6 +9,7 @@ struct active_ssl_buf {
     s32 version;
     u32 fd;
     const char* buf;
+    u64 ssl_ptr;  // SSL结构体指针
 };
 
 // 读写参数缓存Map

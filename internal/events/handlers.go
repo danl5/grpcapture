@@ -17,7 +17,7 @@ type TLSEventHandler struct {
 	packetCh       chan<- *types.PacketInfo
 }
 
-func NewTLSEventHandler(mappingManager *mapping.MappingManager, tlsParser interface{}, packetCh chan<- *types.PacketInfo) *TLSEventHandler {
+func NewTLSEventHandler(mappingManager *mapping.MappingManager, tlsParser any, packetCh chan<- *types.PacketInfo) *TLSEventHandler {
 	return &TLSEventHandler{
 		mappingManager: mappingManager,
 		packetCh:       packetCh,
@@ -26,23 +26,6 @@ func NewTLSEventHandler(mappingManager *mapping.MappingManager, tlsParser interf
 
 func (h *TLSEventHandler) GetEventType() string {
 	return "TLS"
-}
-
-// generateNormalizedConnID 生成规范化的连接ID
-// 通过比较IP地址和端口，确保同一连接的双向流量使用相同的连接ID
-func (h *TLSEventHandler) generateNormalizedConnID(saddr, daddr uint32, sport, dport uint16) string {
-	// 将IP地址转换为字符串进行比较
-	srcIP := fmt.Sprintf("%d.%d.%d.%d",
-		(saddr>>24)&0xFF, (saddr>>16)&0xFF, (saddr>>8)&0xFF, saddr&0xFF)
-	dstIP := fmt.Sprintf("%d.%d.%d.%d",
-		(daddr>>24)&0xFF, (daddr>>16)&0xFF, (daddr>>8)&0xFF, daddr&0xFF)
-
-	// 规范化：较小的IP:端口组合作为第一部分
-	if srcIP < dstIP || (srcIP == dstIP && sport < dport) {
-		return fmt.Sprintf("%s:%d-%s:%d", srcIP, sport, dstIP, dport)
-	} else {
-		return fmt.Sprintf("%s:%d-%s:%d", dstIP, dport, srcIP, sport)
-	}
 }
 
 func (h *TLSEventHandler) CanHandle(eventType EventType) bool {
@@ -65,23 +48,20 @@ func (h *TLSEventHandler) Handle(event Event) error {
 		direction = types.DirectionClientToServer
 	}
 
-	// 提取四元组信息
+	// 通过MappingManager获取四元组信息（优先使用FD，失败后使用SSL指针）
 	var srcIP, dstIP string
 	var srcPort, dstPort uint16
-	if tlsEvent.Meta.TupleValid == 1 {
-		tuple := tlsEvent.Meta.Tuple
+	if tuple, exists := h.mappingManager.GetTupleByFDOrSSL(
+		tlsEvent.Meta.Pid,
+		tlsEvent.Meta.Tid,
+		int32(tlsEvent.Meta.Fd),
+		uintptr(tlsEvent.Meta.SslPtr)); exists {
 		srcIP = fmt.Sprintf("%d.%d.%d.%d",
-			(tuple.Saddr>>24)&0xFF,
-			(tuple.Saddr>>16)&0xFF,
-			(tuple.Saddr>>8)&0xFF,
-			tuple.Saddr&0xFF)
-		srcPort = tuple.Sport
+			tuple.SrcIP[3], tuple.SrcIP[2], tuple.SrcIP[1], tuple.SrcIP[0])
+		srcPort = tuple.SrcPort
 		dstIP = fmt.Sprintf("%d.%d.%d.%d",
-			(tuple.Daddr>>24)&0xFF,
-			(tuple.Daddr>>16)&0xFF,
-			(tuple.Daddr>>8)&0xFF,
-			tuple.Daddr&0xFF)
-		dstPort = tuple.Dport
+			tuple.DstIP[3], tuple.DstIP[2], tuple.DstIP[1], tuple.DstIP[0])
+		dstPort = tuple.DstPort
 	}
 
 	// 构造PacketInfo
@@ -90,6 +70,7 @@ func (h *TLSEventHandler) Handle(event Event) error {
 		Data:        tlsEvent.Data,
 		TimeDiff:    tlsEvent.Meta.Timestamp,
 		PID:         tlsEvent.Meta.Pid,
+		TID:         tlsEvent.Meta.Tid,
 		ProcessName: comm,
 		TCPTuple: &types.TCPTuple{
 			SrcIP:   srcIP,

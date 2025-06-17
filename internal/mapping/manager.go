@@ -3,6 +3,8 @@ package mapping
 import (
 	"sync"
 	"time"
+
+	"github.com/danl5/grpcapture/internal/logger"
 )
 
 // 映射键结构
@@ -121,7 +123,42 @@ func (m *MappingManager) GetTupleBySock(sockPtr uintptr) (TCPTuple, bool) {
 	return tuple, exists
 }
 
-// 组合查询方法（链式查找）
+// 组合查询方法（优先通过FD查找，失败后通过SSL指针查找）
+func (m *MappingManager) GetTupleByFDOrSSL(pid, tid uint32, fd int32, sslPtr uintptr) (TCPTuple, bool) {
+	logger.Debug("GetTupleByFDOrSSL: pid=%d, tid=%d, fd=%d, sslPtr=%d", pid, tid, fd, sslPtr)
+	// 第一步：优先通过FD查找
+	if fd > 0 {
+		sockPtr, exists := m.GetSockByFD(pid, tid, fd)
+		if exists {
+			// 直接通过Sock -> Tuple
+			if tuple, found := m.GetTupleBySock(sockPtr); found {
+				return tuple, true
+			}
+		}
+	}
+
+	// 第二步：如果FD查找失败，通过SSL指针查找
+	if sslPtr != 0 {
+		// SSL -> FD
+		fd, exists := m.GetFDBySSL(pid, tid, sslPtr)
+		if !exists {
+			return TCPTuple{}, false
+		}
+
+		// FD -> Sock
+		sockPtr, exists := m.GetSockByFD(pid, tid, fd)
+		if !exists {
+			return TCPTuple{}, false
+		}
+
+		// Sock -> Tuple
+		return m.GetTupleBySock(sockPtr)
+	}
+
+	return TCPTuple{}, false
+}
+
+// 保持原有方法以兼容现有代码
 func (m *MappingManager) GetTupleBySSL(pid, tid uint32, sslPtr uintptr) (TCPTuple, bool) {
 	// 第一步：SSL -> FD
 	fd, exists := m.GetFDBySSL(pid, tid, sslPtr)

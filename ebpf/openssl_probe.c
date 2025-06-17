@@ -2,11 +2,10 @@
 #include "common.h"
 #include "maps.h"
 
-// SSL结构体偏移量定义 (基于OpenSSL 1.1.1)
 #define SSL_ST_VERSION 0x0
 #define SSL_ST_RBIO 0x10
 #define SSL_ST_WBIO 0x18
-#define BIO_ST_NUM 0x30
+#define BIO_ST_NUM 0x38
 
 // 常量定义
 const u32 invalidFD = 0;
@@ -26,6 +25,7 @@ struct ssl_data_args {
     const char* buf;
     u32 fd;
     s32 version;
+    u64 ssl_ptr;
 };
 
 // 处理SSL数据
@@ -59,30 +59,11 @@ static int process_SSL_data(struct pt_regs* ctx, u64 id, struct ssl_data_args* a
     
     // 设置连接信息
     e->meta.conn_id = args->fd; // 使用fd作为连接ID
+    e->meta.fd = args->fd;      // 设置文件描述符
+    e->meta.ssl_ptr = args->ssl_ptr; // 设置SSL指针
     
-    // DEBUG: 第三层映射 - 通过FD查找TCP连接信息
-    u32 fd = args->fd;
-    DEBUG_PRINT("[LAYER3] Looking up TCP info for FD=%u, PID=%u", fd, e->meta.pid);
-    
-    struct tcp_fd_info *tcp_info = bpf_map_lookup_elem(&tcp_fd_infos, &fd);
-    if (tcp_info) {
-        // 填充TCP四元组信息
-        e->meta.tuple_valid = 1;
-        e->meta.tuple.saddr = bpf_ntohl(tcp_info->saddr);
-        e->meta.tuple.daddr = bpf_ntohl(tcp_info->daddr);
-        e->meta.tuple.sport = tcp_info->sport;
-        e->meta.tuple.dport = tcp_info->dport;
-        e->meta.tuple.family = tcp_info->family;
-        DEBUG_PRINT("[LAYER3] SUCCESS: Found TCP info for FD=%u: %u.%u.%u.%u:%u->%u.%u.%u.%u:%u", 
-                   fd,
-                   (tcp_info->saddr >> 24) & 0xFF, (tcp_info->saddr >> 16) & 0xFF,
-                   (tcp_info->saddr >> 8) & 0xFF, tcp_info->saddr & 0xFF, tcp_info->sport,
-                   (tcp_info->daddr >> 24) & 0xFF, (tcp_info->daddr >> 16) & 0xFF,
-                   (tcp_info->daddr >> 8) & 0xFF, tcp_info->daddr & 0xFF, tcp_info->dport);
-    } else {
-        e->meta.tuple_valid = 0;
-        DEBUG_PRINT("[LAYER3] FAILED: No TCP info found for FD=%u, PID=%u", fd, e->meta.pid);
-    }
+    // 注释：TCP四元组信息现在通过MappingManager在用户空间获取
+    // 不再在eBPF层填充tuple信息
 
     // 复制数据
     if (data_len > 0 && args->buf) {
@@ -154,7 +135,6 @@ int probe_entry_ssl_write(struct pt_regs *ctx) {
     u32 fd = (u32)ssl_wbio_num_addr;
     DEBUG_PRINT("[LAYER2] SSL_write: SSL=%p, BIO_fd=%u", ssl, fd);
     
-    // 移除内核态映射查询逻辑，改为在TLS事件中包含SSL指针
     // 用户态将通过事件分发器查询映射关系
     if (fd == 0) {
         DEBUG_PRINT("[LAYER2] BIO_fd=0, will include SSL pointer in TLS event for user-space mapping");
@@ -170,6 +150,7 @@ int probe_entry_ssl_write(struct pt_regs *ctx) {
     active_ssl_buf_t.fd = fd;
     active_ssl_buf_t.version = ssl_version;
     active_ssl_buf_t.buf = buf;
+    active_ssl_buf_t.ssl_ptr = (u64)ssl;
 
     bpf_map_update_elem(&ssl_write_args, &current_pid_tgid, &active_ssl_buf_t, BPF_ANY);
 
@@ -196,7 +177,8 @@ int probe_return_ssl_write(struct pt_regs *ctx) {
         struct ssl_data_args args = {
             .type = kSSLWrite,
             .fd = active_ssl_buf_t->fd,
-            .version = active_ssl_buf_t->version
+            .version = active_ssl_buf_t->version,
+            .ssl_ptr = active_ssl_buf_t->ssl_ptr
         };
         args.buf = active_ssl_buf_t->buf;
         process_SSL_data(ctx, current_pid_tgid, &args);
@@ -269,6 +251,7 @@ int probe_entry_ssl_read(struct pt_regs *ctx) {
     active_ssl_buf_t.fd = fd;
     active_ssl_buf_t.version = ssl_version;
     active_ssl_buf_t.buf = buf;
+    active_ssl_buf_t.ssl_ptr = (u64)ssl;
 
     bpf_map_update_elem(&ssl_read_args, &current_pid_tgid, &active_ssl_buf_t, BPF_ANY);
     
@@ -300,7 +283,8 @@ int probe_return_ssl_read(struct pt_regs *ctx) {
         struct ssl_data_args args = {
             .type = kSSLRead,
             .fd = active_ssl_buf_t->fd,
-            .version = active_ssl_buf_t->version
+            .version = active_ssl_buf_t->version,
+            .ssl_ptr = active_ssl_buf_t->ssl_ptr
         };
         args.buf = active_ssl_buf_t->buf;
         process_SSL_data(ctx, current_pid_tgid, &args);

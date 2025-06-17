@@ -13,30 +13,20 @@ import (
 	"github.com/danl5/grpcapture/internal/logger"
 )
 
-// TCP四元组结构体 - 手动控制字段顺序和对齐
-type tcpTuple struct {
-	Saddr  uint32    // 源IP地址
-	Daddr  uint32    // 目标IP地址
-	Sport  uint16    // 源端口
-	Dport  uint16    // 目标端口
-	Family uint16    // 地址族 (AF_INET)
-	_      [0]uint16 // 强制对齐
-}
-
 // TLS元数据结构体
 type TlsMeta struct {
-	Timestamp  uint64    // timestamp_ns (8字节)
-	Pid        uint32    // pid (4字节)
-	Tid        uint32    // tid (4字节)
-	DataLen    uint32    // data_len (4字节)
-	IsRead     uint8     // is_read (1字节)
-	TupleValid uint8     // tuple_valid (1字节)
-	Pad        [2]uint8  // _pad[2] (2字节)
-	Comm       [16]uint8 // comm[COMM_LEN] (16字节)
-	SslPtr     uint64    // ssl_ptr (8字节)
-	ConnId     uint64    // conn_id (8字节)
-	Tuple      tcpTuple  // TCP四元组 (14字节)
-	// 总计: 8+4+4+4+1+1+2+16+8+8+14 = 70字节
+	Timestamp uint64    // timestamp_ns (8字节)
+	Pid       uint32    // pid (4字节)
+	Tid       uint32    // tid (4字节)
+	DataLen   uint32    // data_len (4字节)
+	IsRead    uint8     // is_read (1字节)
+	Pad       [3]uint8  // _pad[3] (3字节，用于对齐)
+	Comm      [16]uint8 // comm[COMM_LEN] (16字节)
+	SslPtr    uint64    // ssl_ptr (8字节)
+	ConnId    uint64    // conn_id (8字节)
+	Fd        uint32    // fd (4字节)
+	Pad2      [4]uint8  // pad2[4] (4字节对齐)
+	// 总计: 8+4+4+4+1+3+16+8+8+4+4 = 64字节
 }
 
 type TlsTlsEvent struct {
