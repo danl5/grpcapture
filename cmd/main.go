@@ -205,7 +205,8 @@ func processTLSRecord(record ringbuf.Record, dispatcher *events.EventDispatcher)
 
 	dataLen := int(meta.DataLen)
 	if dataLen <= 0 || dataLen > len(event.Data) {
-		return fmt.Errorf("invalid data length: %d, available: %d", dataLen, len(event.Data))
+		return fmt.Errorf("invalid data length: %d, available: %d",
+			dataLen, len(event.Data))
 	}
 
 	rawData := make([]byte, dataLen)
@@ -245,12 +246,20 @@ func processConnectRecord(record ringbuf.Record, dispatcher *events.EventDispatc
 
 	// 创建连接事件
 	connectEvent := &events.ConnectEvent{
-		PID:       event.Pid,
-		TID:       uint32(event.Tid),
-		FD:        int32(event.Fd),
-		SockPtr:   uintptr(event.Sock),
-		SrcIP:     [4]byte{byte(event.Saddr), byte(event.Saddr >> 8), byte(event.Saddr >> 16), byte(event.Saddr >> 24)},
-		DstIP:     [4]byte{byte(event.Daddr), byte(event.Daddr >> 8), byte(event.Daddr >> 16), byte(event.Daddr >> 24)},
+		PID:     event.Pid,
+		TID:     uint32(event.Tid),
+		FD:      int32(event.Fd),
+		SockPtr: uintptr(event.Sock),
+		SrcIP: [4]byte{
+			byte(event.Saddr),
+			byte(event.Saddr >> 8),
+			byte(event.Saddr >> 16),
+			byte(event.Saddr >> 24)},
+		DstIP: [4]byte{
+			byte(event.Daddr),
+			byte(event.Daddr >> 8),
+			byte(event.Daddr >> 16),
+			byte(event.Daddr >> 24)},
 		SrcPort:   event.Sport,
 		DstPort:   event.Dport,
 		IsDestroy: event.IsDestroy == 1,
@@ -269,18 +278,23 @@ func processHTTPDataRefactored(
 	formatter *formatter.DefaultFormatter) {
 
 	buildConnID := func(packetInfo *types.PacketInfo) string {
-		if packetInfo.TCPTuple == nil || packetInfo.TCPTuple.SrcIP == "" || packetInfo.TCPTuple.DstIP == "" {
-			return fmt.Sprintf("%s-%d-%d", packetInfo.ProcessName, packetInfo.PID, packetInfo.TID)
+		if packetInfo.TCPTuple == nil || packetInfo.TCPTuple.SrcIP == "" ||
+			packetInfo.TCPTuple.DstIP == "" {
+			return ""
 		}
-		srcAddr := fmt.Sprintf("%s:%d", net.IP(packetInfo.TCPTuple.SrcIP[:]).String(), packetInfo.TCPTuple.SrcPort)
-		dstAddr := fmt.Sprintf("%s:%d", net.IP(packetInfo.TCPTuple.DstIP[:]).String(), packetInfo.TCPTuple.DstPort)
+		srcAddr := fmt.Sprintf("%s:%d",
+			net.IP(packetInfo.TCPTuple.SrcIP[:]).String(), packetInfo.TCPTuple.SrcPort)
+		dstAddr := fmt.Sprintf("%s:%d",
+			net.IP(packetInfo.TCPTuple.DstIP[:]).String(), packetInfo.TCPTuple.DstPort)
 
 		// 按字典序排序，确保相同连接生成相同ID
 		var connID string
 		if srcAddr < dstAddr {
-			connID = fmt.Sprintf("%s-%d-%s-%s", packetInfo.ProcessName, packetInfo.PID, srcAddr, dstAddr)
+			connID = fmt.Sprintf("%s-%d-%s-%s",
+				packetInfo.ProcessName, packetInfo.PID, srcAddr, dstAddr)
 		} else {
-			connID = fmt.Sprintf("%s-%d-%s-%s", packetInfo.ProcessName, packetInfo.PID, dstAddr, srcAddr)
+			connID = fmt.Sprintf("%s-%d-%s-%s",
+				packetInfo.ProcessName, packetInfo.PID, dstAddr, srcAddr)
 		}
 		return connID
 	}
@@ -291,6 +305,7 @@ func processHTTPDataRefactored(
 			return
 		case packetInfo := <-packetCh:
 			connID := buildConnID(packetInfo)
+			logger.Debug("packetInfo %+v", packetInfo)
 			logger.Debug("connID: %s", connID)
 			if err := hTracker.ProcessPacket(connID, packetInfo); err != nil {
 				logger.Debug("Parse data failed: %v", err)
@@ -300,6 +315,7 @@ func processHTTPDataRefactored(
 			// 处理解析结果
 			select {
 			case req := <-hTracker.GetRequestChan():
+				logger.Debug("req compelete %b", req.Complete)
 				switch {
 				case req.Proto == "TLS/Other":
 					fmt.Print(formatter.FormatTLSData(req, nil))
@@ -307,6 +323,7 @@ func processHTTPDataRefactored(
 					fmt.Print(formatter.FormatHTTPData(req, nil))
 				}
 			case resp := <-hTracker.GetResponseChan():
+				logger.Debug("resp compelete %b", resp.Complete)
 				switch {
 				case resp.Proto == "TLS/Other":
 					fmt.Print(formatter.FormatTLSData(nil, resp))
@@ -321,7 +338,10 @@ func processHTTPDataRefactored(
 }
 
 // 打印统计信息
-func printStatsRefactored(ctx context.Context, dispatcher *events.EventDispatcher, mappingManager *mapping.MappingManager) {
+func printStatsRefactored(
+	ctx context.Context,
+	dispatcher *events.EventDispatcher,
+	mappingManager *mapping.MappingManager) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
