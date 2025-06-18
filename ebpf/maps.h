@@ -9,6 +9,7 @@ struct active_ssl_buf {
     s32 version;
     u32 fd;
     const char* buf;
+    u64 ssl_ptr;  // SSL结构体指针
 };
 
 // 读写参数缓存Map
@@ -39,22 +40,6 @@ struct {
     __uint(max_entries, 4);
 } stats SEC(".maps");
 
-// Map to store socket file descriptors for each process during SSL operations
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(key_size, sizeof(__u64));
-    __uint(value_size, sizeof(__u32));
-    __uint(max_entries, MAX_ENTRIES);
-} active_ssl_sockets SEC(".maps");
-
-// 临时存储当前SSL操作的SSL指针
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(key_size, sizeof(__u64));  // pid_tgid
-    __uint(value_size, sizeof(__u64)); // ssl_ptr
-    __uint(max_entries, 102400);
-} current_ssl_ptr SEC(".maps");
-
 // Map to mark processes that are currently in SSL operations
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -79,13 +64,8 @@ struct {
     __uint(max_entries, 1);
 } filter_config SEC(".maps");
 
-// SSL对象到文件描述符的映射（参考ecapture的ssl_st_fd）
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(key_size, sizeof(__u64));    // SSL指针
-    __uint(value_size, sizeof(__u64));  // 文件描述符
-    __uint(max_entries, 10240);
-} ssl_st_fd SEC(".maps");
+// SSL对象到文件描述符的映射已移至用户态管理
+// 通过ssl_set_fd_events事件进行映射维护
 
 // 文件描述符到TCP连接信息的映射
 struct {
@@ -110,14 +90,7 @@ struct {
     __uint(max_entries, 10240);
 } active_accept_args SEC(".maps");
 
-// 用于存储从网络系统调用中获取的sock结构体
-// 使用SSL连接标识作为key，支持一个进程内的多个SSL连接
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(key_size, sizeof(struct ssl_conn_key));
-    __uint(value_size, sizeof(struct sock *));
-    __uint(max_entries, 20480);  // 调整大小更合理
-} sock_storage SEC(".maps");
+// sock_storage映射已移除，映射管理已移至用户态
 
 // 文件描述符到sock结构体的映射
 // 使用pid_tgid+fd作为key，直接映射到sock结构体
@@ -135,6 +108,12 @@ struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
     __uint(max_entries, 64 * 1024 * 1024); // 64MB
 } connect_events SEC(".maps");
+
+// SSL设置FD事件输出
+struct {
+    __uint(type, BPF_MAP_TYPE_RINGBUF);
+    __uint(max_entries, 16 * 1024 * 1024); // 16MB
+} ssl_set_fd_events SEC(".maps");
 
 // 每CPU数据缓冲区（用于减少内存分配开销）
 struct {

@@ -35,14 +35,7 @@
 #define MIN_DATA_SIZE 1   // 最小数据长度过滤（数据包抓取场景）
 #define TASK_COMM_LEN 16  // 进程名长度
 
-// TCP连接四元组信息
-struct tcp_tuple {
-    __u32 saddr;   // 源IP地址
-    __u32 daddr;   // 目标IP地址
-    __u16 sport;   // 源端口
-    __u16 dport;   // 目标端口
-    __u16 family;  // 地址族 (AF_INET)
-} __attribute__((packed));
+
 
 // 统一的TLS元数据结构
 struct meta {
@@ -51,26 +44,20 @@ struct meta {
     __u32 tid;
     __u32 data_len;
     __u8 is_read;           // 0 for write, 1 for read
-    __u8 tuple_valid;       // 1 if tuple is valid, 0 otherwise
-    __u8 _pad[2];           // 对齐填充
+    __u8 _pad[3];           // 对齐填充
     char comm[COMM_LEN];
     __u64 ssl_ptr;
     __u64 conn_id;
-    struct tcp_tuple tuple;
+    __u32 fd;               // file descriptor
+    __u8 _pad2[4];          // 对齐填充
 } __attribute__((packed));
 
 struct tls_event {
     struct meta meta;
-    __u8 _pad[2]; // 对齐填充
     __u8 data[MAX_DATA_SIZE];
 } __attribute__((packed));
 
-// 参数缓存结构
-struct ssl_args {
-    const void *ssl;
-    const void *buf;
-    int num;
-} __attribute__((packed));
+// ssl_args结构体已移除，未被使用
 
 // SSL连接标识结构体 - 用作更精确的key
 struct ssl_conn_key {
@@ -115,6 +102,16 @@ struct connect_event_t {
     __u64 sock;
     __u8 is_destroy;      // 是否为连接销毁事件
     __u8 pad[7];          // 对齐填充
+};
+
+// SSL设置FD事件结构
+struct ssl_set_fd_event {
+    __u64 timestamp_ns;
+    __u32 pid;
+    __u32 tid;
+    __u64 ssl_ptr;
+    __u32 fd;
+    __u8 pad[4];          // 对齐填充
 };
 
 // PID过滤函数

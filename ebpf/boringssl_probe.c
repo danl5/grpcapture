@@ -13,15 +13,14 @@ int probe_entry_ssl_write_ex(struct pt_regs *ctx) {
         return 0;
     }
     
-    void *ssl = (void *)PT_REGS_PARM1(ctx);
+    void *ssl __attribute__((unused)) = (void *)PT_REGS_PARM1(ctx);
     
     DEBUG_PRINT("DEBUG: SSL_write_ex - ssl=%p", ssl);
     
     __u8 flag = 1;
     bpf_map_update_elem(&ssl_operation_flag, &pid_tgid, &flag, BPF_ANY);
     
-    __u64 ssl_ptr = (__u64)ssl;
-    bpf_map_update_elem(&current_ssl_ptr, &pid_tgid, &ssl_ptr, BPF_ANY);
+    // current_ssl_ptr映射已移除，功能移至用户态
     
     return 0;
 }
@@ -36,15 +35,14 @@ int probe_entry_ssl_read_ex(struct pt_regs *ctx) {
         return 0;
     }
     
-    void *ssl = (void *)PT_REGS_PARM1(ctx);
+    void *ssl __attribute__((unused)) = (void *)PT_REGS_PARM1(ctx);
     
     DEBUG_PRINT("DEBUG: SSL_read_ex - ssl=%p", ssl);
     
     __u8 flag = 1;
     bpf_map_update_elem(&ssl_operation_flag, &pid_tgid, &flag, BPF_ANY);
     
-    __u64 ssl_ptr = (__u64)ssl;
-    bpf_map_update_elem(&current_ssl_ptr, &pid_tgid, &ssl_ptr, BPF_ANY);
+    // current_ssl_ptr映射已移除，功能移至用户态
     
     return 0;
 }

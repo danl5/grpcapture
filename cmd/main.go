@@ -1,66 +1,104 @@
 package main
 
-//go:generate make -C .. generate
-
 import (
-	"bytes"
 	"context"
-	"flag"
 	"fmt"
-	"log"
+	"net"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
 	"unsafe"
 
 	"github.com/cilium/ebpf/ringbuf"
-	"github.com/danl5/htrack"
+	htrack "github.com/danl5/htrack"
 	"github.com/danl5/htrack/types"
-)
 
-var (
-	targetPIDs []uint32
-	soFilePath string
-	printHex   bool
+	"github.com/danl5/grpcapture/internal/config"
+	"github.com/danl5/grpcapture/internal/ebpf"
+	"github.com/danl5/grpcapture/internal/events"
+	"github.com/danl5/grpcapture/internal/formatter"
+	"github.com/danl5/grpcapture/internal/logger"
+	"github.com/danl5/grpcapture/internal/mapping"
 )
 
 func main() {
 	// 解析命令行参数
-	parseCmdArgs()
+	cfg := config.ParseFlags()
+	pidFilter := cfg.TargetPIDs
+	sslLibPath := cfg.SOFile
 
-	ebpfSetup, err := setupBpf(soFilePath)
+	// 设置日志模式
+	logger.SetDebug(cfg.Debug)
+
+	// 初始化格式化器
+	var bodyFormat formatter.OutputFormat
+	if cfg.HexOutput {
+		bodyFormat = formatter.FormatHex
+	} else {
+		bodyFormat = formatter.FormatText
+	}
+	formatterInstance := formatter.NewDefaultFormatter(bodyFormat)
+
+	// 设置eBPF程序
+	logger.Debug("Setting up eBPF with SSL library: %s", sslLibPath)
+	ebpfSetup, err := ebpf.Setup(sslLibPath)
 	if err != nil {
-		log.Fatalf("eBPF setup failed: %v", err)
+		logger.Fatal("Failed to setup eBPF: %v", err)
 	}
 	defer ebpfSetup.Close()
+	logger.Debug("eBPF setup completed successfully")
 
 	// 配置PID过滤
-	if len(targetPIDs) > 0 {
-		log.Printf("Enabling PID filter for PIDs: %v", targetPIDs)
-		if err := ebpfSetup.EnablePIDFilter(); err != nil {
-			log.Fatalf("Failed to enable PID filter: %v", err)
+	if len(pidFilter) > 0 {
+		logger.Debug("Setting PID filter: %v", pidFilter)
+		if err := ebpfSetup.SetPIDFilter(pidFilter); err != nil {
+			logger.Fatal("Failed to set PID filter: %v", err)
 		}
-		if err := ebpfSetup.AddPIDs(targetPIDs); err != nil {
-			log.Fatalf("Failed to add target PIDs: %v", err)
-		}
-		log.Printf("PID filter configured successfully")
+		logger.Info("PID filter set: %v", pidFilter)
 	} else {
-		log.Printf("No PID filter specified, monitoring all processes")
+		logger.Info("No PID filter specified, monitoring all processes")
 	}
 
-	// 初始化 HTTP 解析器
+	// 初始化组件
+	mappingManager := mapping.NewMappingManager()
+	defer mappingManager.Stop()
+
+	eventDispatcher := events.NewEventDispatcher()
+	defer eventDispatcher.Stop()
+
+	// 初始化TLS解析器
 	hTracker := initTLSParser()
+
+	// 创建数据包处理通道
+	packetCh := make(chan *types.PacketInfo, 1000)
+
+	// 注册事件处理器
+	tlsHandler := events.NewTLSEventHandler(mappingManager, nil, packetCh)
+	sslSetFDHandler := events.NewSSLSetFDEventHandler(mappingManager)
+	connectHandler := events.NewConnectEventHandler(mappingManager)
+	statsHandler := events.NewStatsEventHandler(mappingManager)
+
+	eventDispatcher.RegisterHandler(tlsHandler)
+	eventDispatcher.RegisterHandler(sslSetFDHandler)
+	eventDispatcher.RegisterHandler(connectHandler)
+	eventDispatcher.RegisterHandler(statsHandler)
+
+	// 启动事件分发器
+	eventDispatcher.Start()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// 启动HTTP数据处理
-	go processHTTPData(ctx, hTracker)
+	go processHTTPDataRefactored(ctx, hTracker, packetCh, formatterInstance)
 
-	eventCh := readEventRecords(ctx, ebpfSetup.rd)
+	// 启动事件读取器
+	go startEventReaders(ctx, ebpfSetup, eventDispatcher)
+
+	// 启动统计信息打印
+	go printStatsRefactored(ctx, eventDispatcher, mappingManager)
 
 	// 信号处理
 	sigCh := make(chan os.Signal, 1)
@@ -71,21 +109,259 @@ func main() {
 		cancel()
 	}()
 
-	fmt.Println("Capturing TLS data... Press Ctrl+C to stop.")
+	fmt.Println("Capturing TLS data with refactored architecture... Press Ctrl+C to stop.")
 
-	// 事件处理循环
+	// 等待退出信号
+	<-ctx.Done()
+	logger.Info("Shutdown complete")
+}
+
+// 启动所有事件读取器
+func startEventReaders(ctx context.Context, ebpfSetup *ebpf.EBPFSetup, dispatcher *events.EventDispatcher) {
+	// TLS事件读取器
+	go func() {
+		tlsEventCh := ebpf.ReadEventRecords(ctx, ebpfSetup.GetRingBuffer())
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case record, ok := <-tlsEventCh:
+				if !ok {
+					logger.Debug("TLS event channel closed")
+					return
+				}
+				if err := processTLSRecord(record, dispatcher); err != nil {
+					logger.Error("Error processing TLS record: %v", err)
+				}
+			}
+		}
+	}()
+
+	// SSL设置FD事件读取器
+	go func() {
+		sslSetFdReader, err := ringbuf.NewReader(ebpfSetup.GetCollection().Maps["ssl_set_fd_events"])
+		if err != nil {
+			logger.Error("Failed to create SSL set FD event reader: %v", err)
+			return
+		}
+		logger.Debug("SSL set FD event reader created successfully")
+		defer sslSetFdReader.Close()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				record, err := sslSetFdReader.Read()
+				if err != nil {
+					if ctx.Err() != nil {
+						return
+					}
+					logger.Error("Reading SSL set FD event failed: %v", err)
+					continue
+				}
+				if err := processSSLSetFDRecord(record, dispatcher); err != nil {
+					logger.Error("Error processing SSL set FD record: %v", err)
+				}
+			}
+		}
+	}()
+
+	// 连接事件读取器
+	go func() {
+		connectReader, err := ringbuf.NewReader(ebpfSetup.GetCollection().Maps["connect_events"])
+		if err != nil {
+			logger.Error("Failed to create connect event reader: %v", err)
+			return
+		}
+		logger.Debug("Connect event reader created successfully")
+		defer connectReader.Close()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				record, err := connectReader.Read()
+				if err != nil {
+					if ctx.Err() != nil {
+						return
+					}
+					logger.Error("Reading connect event failed: %v", err)
+					continue
+				}
+				if err := processConnectRecord(record, dispatcher); err != nil {
+					logger.Error("Error processing connect record: %v", err)
+				}
+			}
+		}
+	}()
+}
+
+// 处理TLS记录
+func processTLSRecord(record ringbuf.Record, dispatcher *events.EventDispatcher) error {
+	event := (*ebpf.TlsTlsEvent)(unsafe.Pointer(&record.RawSample[0]))
+	meta := event.Meta
+
+	dataLen := int(meta.DataLen)
+	if dataLen <= 0 || dataLen > len(event.Data) {
+		return fmt.Errorf("invalid data length: %d, available: %d",
+			dataLen, len(event.Data))
+	}
+
+	rawData := make([]byte, dataLen)
+	copy(rawData, event.Data[:dataLen])
+
+	// 创建TLS事件
+	tlsEvent := &events.TLSEvent{
+		Meta: meta,
+		Data: rawData,
+	}
+
+	// 分发事件
+	dispatcher.DispatchEvent(tlsEvent)
+	return nil
+}
+
+// 处理SSL设置FD记录
+func processSSLSetFDRecord(record ringbuf.Record, dispatcher *events.EventDispatcher) error {
+	event := (*ebpf.SslSetFdEvent)(unsafe.Pointer(&record.RawSample[0]))
+
+	// 创建SSL设置FD事件
+	sslSetFDEvent := &events.SSLSetFDEvent{
+		PID:    event.Pid,
+		TID:    event.Tid,
+		SSLPtr: uintptr(event.SslPtr),
+		FD:     int32(event.Fd),
+	}
+
+	// 分发事件
+	dispatcher.DispatchEvent(sslSetFDEvent)
+	return nil
+}
+
+// 处理连接记录
+func processConnectRecord(record ringbuf.Record, dispatcher *events.EventDispatcher) error {
+	event := (*ebpf.ConnectEvent)(unsafe.Pointer(&record.RawSample[0]))
+
+	// 创建连接事件
+	connectEvent := &events.ConnectEvent{
+		PID:     event.Pid,
+		TID:     uint32(event.Tid),
+		FD:      int32(event.Fd),
+		SockPtr: uintptr(event.Sock),
+		SrcIP: [4]byte{
+			byte(event.Saddr),
+			byte(event.Saddr >> 8),
+			byte(event.Saddr >> 16),
+			byte(event.Saddr >> 24)},
+		DstIP: [4]byte{
+			byte(event.Daddr),
+			byte(event.Daddr >> 8),
+			byte(event.Daddr >> 16),
+			byte(event.Daddr >> 24)},
+		SrcPort:   event.Sport,
+		DstPort:   event.Dport,
+		IsDestroy: event.IsDestroy == 1,
+	}
+
+	// 分发事件
+	dispatcher.DispatchEvent(connectEvent)
+	return nil
+}
+
+// HTTP数据处理协程
+func processHTTPDataRefactored(
+	ctx context.Context,
+	hTracker *htrack.HTrack,
+	packetCh <-chan *types.PacketInfo,
+	formatter *formatter.DefaultFormatter) {
+
+	buildConnID := func(packetInfo *types.PacketInfo) string {
+		if packetInfo.TCPTuple == nil || packetInfo.TCPTuple.SrcIP == "" ||
+			packetInfo.TCPTuple.DstIP == "" {
+			return ""
+		}
+		srcAddr := fmt.Sprintf("%s:%d",
+			net.IP(packetInfo.TCPTuple.SrcIP[:]).String(), packetInfo.TCPTuple.SrcPort)
+		dstAddr := fmt.Sprintf("%s:%d",
+			net.IP(packetInfo.TCPTuple.DstIP[:]).String(), packetInfo.TCPTuple.DstPort)
+
+		// 按字典序排序，确保相同连接生成相同ID
+		var connID string
+		if srcAddr < dstAddr {
+			connID = fmt.Sprintf("%s-%d-%s-%s",
+				packetInfo.ProcessName, packetInfo.PID, srcAddr, dstAddr)
+		} else {
+			connID = fmt.Sprintf("%s-%d-%s-%s",
+				packetInfo.ProcessName, packetInfo.PID, dstAddr, srcAddr)
+		}
+		return connID
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
-			// printStats(ebpfSetup.coll)
 			return
-		case record, ok := <-eventCh:
-			if !ok {
-				log.Println("Event channel closed, exiting")
-				return
+		case packetInfo := <-packetCh:
+			connID := buildConnID(packetInfo)
+			logger.Debug("packetInfo %+v", packetInfo)
+			logger.Debug("connID: %s", connID)
+			if err := hTracker.ProcessPacket(connID, packetInfo); err != nil {
+				logger.Debug("Parse data failed: %v", err)
+				continue
 			}
-			if err := processRecord(record, hTracker); err != nil {
-				log.Printf("Error processing event: %v", err)
+
+			// 处理解析结果
+			select {
+			case req := <-hTracker.GetRequestChan():
+				logger.Debug("req compelete %b", req.Complete)
+				switch {
+				case req.Proto == "TLS/Other":
+					fmt.Print(formatter.FormatTLSData(req, nil))
+				case strings.HasPrefix(req.Proto, "HTTP"):
+					fmt.Print(formatter.FormatHTTPData(req, nil))
+				}
+			case resp := <-hTracker.GetResponseChan():
+				logger.Debug("resp compelete %b", resp.Complete)
+				switch {
+				case resp.Proto == "TLS/Other":
+					fmt.Print(formatter.FormatTLSData(nil, resp))
+				case strings.HasPrefix(resp.Proto, "HTTP"):
+					fmt.Print(formatter.FormatHTTPData(nil, resp))
+				}
+			default:
+				// 没有新的解析结果
+			}
+		}
+	}
+}
+
+// 打印统计信息
+func printStatsRefactored(
+	ctx context.Context,
+	dispatcher *events.EventDispatcher,
+	mappingManager *mapping.MappingManager) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// 打印事件分发器统计
+			eventStats := dispatcher.GetStats()
+			logger.VerboseLog("=== Event Dispatcher Stats ===")
+			for eventType, stats := range eventStats {
+				logger.VerboseLog("%s: Processed=%d, Errors=%d", eventType, stats.Processed, stats.Errors)
+			}
+
+			// 打印映射管理器统计
+			mappingStats := mappingManager.GetStats()
+			logger.VerboseLog("=== Mapping Manager Stats ===")
+			for name, count := range mappingStats {
+				logger.VerboseLog("%s: %d", name, count)
 			}
 		}
 	}
@@ -93,8 +369,8 @@ func main() {
 
 // 初始化 TLS 解析器
 func initTLSParser() *htrack.HTrack {
-	log.Println("TLS parser initialized")
-	return htrack.New(&htrack.Config{
+	logger.Debug("Initializing TLS parser")
+	parser := htrack.New(&htrack.Config{
 		MaxSessions:       10000,
 		MaxTransactions:   10000,
 		BufferSize:        64 * 1024, // 64KB
@@ -105,202 +381,6 @@ func initTLSParser() *htrack.HTrack {
 		ChannelBufferSize: 100,
 		EnableChannels:    true,
 	})
-}
-
-// HTTP数据处理协程
-func processHTTPData(ctx context.Context, hTracker *htrack.HTrack) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case req := <-hTracker.GetRequestChan():
-			switch {
-			case req.Proto == "TLS/Other":
-				printTLSData(req, nil)
-			case strings.HasPrefix(req.Proto, "HTTP/1.0"):
-				fallthrough
-			case strings.HasPrefix(req.Proto, "HTTP/1.1"):
-				fallthrough
-			case strings.HasPrefix(req.Proto, "HTTP/2"):
-				printHTTPData(req, nil)
-			}
-
-		case resp := <-hTracker.GetResponseChan():
-			switch {
-			case resp.Proto == "TLS/Other":
-				printTLSData(nil, resp)
-			case strings.HasPrefix(resp.Proto, "HTTP/1.0"):
-				fallthrough
-			case strings.HasPrefix(resp.Proto, "HTTP/1.1"):
-				fallthrough
-			case strings.HasPrefix(resp.Proto, "HTTP/2"):
-				printHTTPData(nil, resp)
-			}
-		}
-	}
-}
-
-// 辅助函数：将uint32 IP地址转换为字符串
-func uint32ToIP(ip uint32) string {
-	return fmt.Sprintf("%d.%d.%d.%d",
-		(ip>>24)&0xFF,
-		(ip>>16)&0xFF,
-		(ip>>8)&0xFF,
-		ip&0xFF)
-}
-
-// 处理ringbuf记录
-func processRecord(record ringbuf.Record, hTracker *htrack.HTrack) error {
-
-	event := (*tlsTlsEvent)(unsafe.Pointer(&record.RawSample[0]))
-	meta := event.Meta
-
-	dataLen := int(meta.DataLen)
-	if dataLen <= 0 || dataLen > len(event.Data) {
-		return fmt.Errorf("invalid data length: %d, available: %d", dataLen, len(event.Data))
-	}
-
-	rawData := event.Data[:dataLen]
-
-	var sessionID string
-	if meta.TupleValid == 1 {
-		// 使用规范化的TCP四元组生成会话ID，确保同一连接的双向流量使用相同ID
-		sessionID = generateNormalizedConnID(
-			meta.Tuple.Saddr, meta.Tuple.Daddr,
-			meta.Tuple.Sport, meta.Tuple.Dport)
-	} else {
-		// 回退到原有的PID+TID+SSLPtr方案
-		sessionID = fmt.Sprintf("%d-%d-%d", meta.Pid, meta.Tid, meta.SslPtr)
-	}
-
-	packetInfo := buildPacketInfo(&meta, rawData)
-	if err := hTracker.ProcessPacket(sessionID, packetInfo); err != nil {
-		return fmt.Errorf("parse data failed: %w", err)
-	}
-
-	return nil
-}
-
-func buildPacketInfo(meta *tlsMeta, data []byte) *types.PacketInfo {
-	// 提取元数据
-	commBytes := *(*[16]byte)(unsafe.Pointer(&meta.Comm[0]))
-	comm := bytes.TrimRight(commBytes[:], "\x00")
-
-	// 提取方向信息
-	direction := types.DirectionServerToClient
-	if meta.IsRead == 1 {
-		direction = types.DirectionClientToServer
-	}
-
-	// 提取四元组信息
-	var srcIP, dstIP string
-	var srcPort, dstPort uint16
-	if meta.TupleValid == 1 {
-		srcIP = uint32ToIP(meta.Tuple.Saddr)
-		srcPort = meta.Tuple.Sport
-		dstIP = uint32ToIP(meta.Tuple.Daddr)
-		dstPort = meta.Tuple.Dport
-	}
-
-	// 构造PacketInfo
-	packetInfo := &types.PacketInfo{
-		Direction:   direction,
-		Data:        data,
-		TimeDiff:    meta.Timestamp,
-		PID:         meta.Pid,
-		ProcessName: string(comm),
-		TCPTuple: &types.TCPTuple{
-			SrcIP:   srcIP,
-			SrcPort: srcPort,
-			DstIP:   dstIP,
-			DstPort: dstPort,
-		},
-	}
-
-	return packetInfo
-}
-
-// 解析命令行参数
-func parseCmdArgs() {
-	var pidStr = flag.String("pid", "", "Target PID to monitor")
-	var pidsStr = flag.String("pids", "", "Comma-separated list of PIDs to monitor")
-	var pidFile = flag.String("pid-file", "", "File containing PIDs to monitor (one per line)")
-	var soFile = flag.String("so-file", "/usr/lib/x86_64-linux-gnu/libssl.so.3", "Path to the SSL library file to monitor")
-	var hex = flag.Bool("hex", false, "Print body in hex")
-
-	flag.Parse()
-
-	// 解析单个PID参数
-	if *pidStr != "" {
-		if pid, err := strconv.ParseUint(*pidStr, 10, 32); err == nil {
-			targetPIDs = append(targetPIDs, uint32(pid))
-		} else {
-			log.Printf("Warning: invalid PID format: %s", *pidStr)
-		}
-	}
-
-	// 解析多个PID参数
-	if *pidsStr != "" {
-		for _, pidStr := range strings.Split(*pidsStr, ",") {
-			pidStr = strings.TrimSpace(pidStr)
-			if pidStr != "" {
-				if pid, err := strconv.ParseUint(pidStr, 10, 32); err == nil {
-					targetPIDs = append(targetPIDs, uint32(pid))
-				} else {
-					log.Printf("Warning: invalid PID format: %s", pidStr)
-				}
-			}
-		}
-	}
-
-	// 从文件读取PID列表
-	if *pidFile != "" {
-		if data, err := os.ReadFile(*pidFile); err == nil {
-			for _, line := range strings.Split(string(data), "\n") {
-				line = strings.TrimSpace(line)
-				// 跳过空行和注释行
-				if line != "" && !strings.HasPrefix(line, "#") {
-					if pid, err := strconv.ParseUint(line, 10, 32); err == nil {
-						targetPIDs = append(targetPIDs, uint32(pid))
-					} else {
-						log.Printf("Warning: invalid PID format in file: %s", line)
-					}
-				}
-			}
-		} else {
-			log.Printf("Warning: failed to read PID file %s: %v", *pidFile, err)
-		}
-	}
-
-	// 去重PID列表
-	if len(targetPIDs) > 0 {
-		pidMap := make(map[uint32]bool)
-		uniquePIDs := make([]uint32, 0)
-		for _, pid := range targetPIDs {
-			if !pidMap[pid] {
-				pidMap[pid] = true
-				uniquePIDs = append(uniquePIDs, pid)
-			}
-		}
-		targetPIDs = uniquePIDs
-	}
-
-	// 设置so文件路径
-	soFilePath = *soFile
-	printHex = *hex
-}
-
-// generateNormalizedConnID 生成规范化的连接ID
-// 通过比较IP地址和端口，确保同一连接的双向流量使用相同的连接ID
-func generateNormalizedConnID(saddr, daddr uint32, sport, dport uint16) string {
-	// 将IP地址转换为字符串进行比较
-	srcIP := uint32ToIP(saddr)
-	dstIP := uint32ToIP(daddr)
-
-	// 规范化：较小的IP:端口组合作为第一部分
-	if srcIP < dstIP || (srcIP == dstIP && sport < dport) {
-		return fmt.Sprintf("%s:%d-%s:%d", srcIP, sport, dstIP, dport)
-	} else {
-		return fmt.Sprintf("%s:%d-%s:%d", dstIP, dport, srcIP, sport)
-	}
+	logger.Debug("TLS parser initialized successfully")
+	return parser
 }

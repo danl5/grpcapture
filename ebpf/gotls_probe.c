@@ -74,8 +74,7 @@ int probe_go_tls_close(struct pt_regs *ctx) {
     
     // 清理相关的映射条目
     bpf_map_delete_elem(&ssl_operation_flag, &pid_tgid);
-    bpf_map_delete_elem(&current_ssl_ptr, &pid_tgid);
-    bpf_map_delete_elem(&active_ssl_sockets, &pid_tgid);
+    // current_ssl_ptr, active_ssl_sockets映射已移除
 
     
     return 0;

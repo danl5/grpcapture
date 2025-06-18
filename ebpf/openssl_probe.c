@@ -2,11 +2,10 @@
 #include "common.h"
 #include "maps.h"
 
-// SSL结构体偏移量定义 (基于OpenSSL 1.1.1)
 #define SSL_ST_VERSION 0x0
 #define SSL_ST_RBIO 0x10
 #define SSL_ST_WBIO 0x18
-#define BIO_ST_NUM 0x30
+#define BIO_ST_NUM 0x38
 
 // 常量定义
 const u32 invalidFD = 0;
@@ -26,12 +25,13 @@ struct ssl_data_args {
     const char* buf;
     u32 fd;
     s32 version;
+    u64 ssl_ptr;
 };
 
 // 处理SSL数据
 static int process_SSL_data(struct pt_regs* ctx, u64 id, struct ssl_data_args* args) {
     int len = (int)PT_REGS_RC(ctx);
-    if (len < 0) {
+    if (len <= 0) {
         return 0;
     }
 
@@ -40,7 +40,15 @@ static int process_SSL_data(struct pt_regs* ctx, u64 id, struct ssl_data_args* a
         return 0;
     }
 
-    u32 data_len = (len > MAX_DATA_SIZE) ? MAX_DATA_SIZE : (u32)len;
+    // 确保 data_len 为正数且在合理范围内
+    u32 data_len = 0;
+    if (len > 0 && len <= MAX_DATA_SIZE) {
+        data_len = (u32)len;
+    } else if (len > MAX_DATA_SIZE) {
+        data_len = MAX_DATA_SIZE;
+    } else {
+        return 0; // 不应该到达这里，但为了安全起见
+    }
     
     // 使用ringbuf分配事件
     struct tls_event *e = bpf_ringbuf_reserve(&tls_events, sizeof(struct tls_event), 0);
@@ -59,43 +67,21 @@ static int process_SSL_data(struct pt_regs* ctx, u64 id, struct ssl_data_args* a
     
     // 设置连接信息
     e->meta.conn_id = args->fd; // 使用fd作为连接ID
+    e->meta.fd = args->fd;      // 设置文件描述符
+    e->meta.ssl_ptr = args->ssl_ptr; // 设置SSL指针
     
-    // DEBUG: 第三层映射 - 通过FD查找TCP连接信息
-    u32 fd = args->fd;
-    DEBUG_PRINT("[LAYER3] Looking up TCP info for FD=%u, PID=%u", fd, e->meta.pid);
-    
-    struct tcp_fd_info *tcp_info = bpf_map_lookup_elem(&tcp_fd_infos, &fd);
-    if (tcp_info) {
-        // 填充TCP四元组信息
-        e->meta.tuple_valid = 1;
-        e->meta.tuple.saddr = bpf_ntohl(tcp_info->saddr);
-        e->meta.tuple.daddr = bpf_ntohl(tcp_info->daddr);
-        e->meta.tuple.sport = tcp_info->sport;
-        e->meta.tuple.dport = tcp_info->dport;
-        e->meta.tuple.family = tcp_info->family;
-        DEBUG_PRINT("[LAYER3] SUCCESS: Found TCP info for FD=%u: %u.%u.%u.%u:%u->%u.%u.%u.%u:%u", 
-                   fd,
-                   (tcp_info->saddr >> 24) & 0xFF, (tcp_info->saddr >> 16) & 0xFF,
-                   (tcp_info->saddr >> 8) & 0xFF, tcp_info->saddr & 0xFF, tcp_info->sport,
-                   (tcp_info->daddr >> 24) & 0xFF, (tcp_info->daddr >> 16) & 0xFF,
-                   (tcp_info->daddr >> 8) & 0xFF, tcp_info->daddr & 0xFF, tcp_info->dport);
-    } else {
-        e->meta.tuple_valid = 0;
-        DEBUG_PRINT("[LAYER3] FAILED: No TCP info found for FD=%u, PID=%u", fd, e->meta.pid);
-    }
+    // 注释：TCP四元组信息现在通过MappingManager在用户空间获取
+    // 不再在eBPF层填充tuple信息
 
     // 复制数据
-    if (data_len > 0 && args->buf) {
-        long res = bpf_probe_read_user(e->data, data_len, args->buf);
+    if (data_len > 0 && data_len <= MAX_DATA_SIZE && args->buf) {
+        long res = bpf_probe_read_user(e->data, data_len & (MAX_DATA_SIZE - 1), args->buf);
         e->meta.data_len = (res >= 0) ? data_len : 0;
         
-        // Debug: 打印data的前八个字符
-        if (res >= 0 && data_len >= 8) {
-            DEBUG_PRINT("[DEBUG] Data first 8 bytes: %02x %02x %02x %02x %02x %02x %02x %02x",
-                       (unsigned char)e->data[0], (unsigned char)e->data[1],
-                       (unsigned char)e->data[2], (unsigned char)e->data[3],
-                       (unsigned char)e->data[4], (unsigned char)e->data[5],
-                       (unsigned char)e->data[6], (unsigned char)e->data[7]);
+        // Debug: 打印data的前两个字节
+        if (res >= 0 && data_len >= 2) {
+            DEBUG_PRINT("[DEBUG] Data first 2 bytes: %02x %02x",
+                       (unsigned char)e->data[0], (unsigned char)e->data[1]);
         } else if (res >= 0 && data_len > 0) {
             DEBUG_PRINT("[DEBUG] Data length %d < 8, showing available bytes:", data_len);
             for (int i = 0; i < data_len && i < 8; i++) {
@@ -154,16 +140,10 @@ int probe_entry_ssl_write(struct pt_regs *ctx) {
     u32 fd = (u32)ssl_wbio_num_addr;
     DEBUG_PRINT("[LAYER2] SSL_write: SSL=%p, BIO_fd=%u", ssl, fd);
     
+    // 用户态将通过事件分发器查询映射关系
     if (fd == 0) {
-        u64 ssl_addr = (u64)ssl;
-        DEBUG_PRINT("[LAYER2] BIO_fd=0, looking up ssl_st_fd map for SSL=%p", ssl);
-        u64 *fd_ptr = bpf_map_lookup_elem(&ssl_st_fd, &ssl_addr);
-        if (fd_ptr) {
-            fd = (u64)*fd_ptr;
-            DEBUG_PRINT("[LAYER2] SUCCESS: Found FD=%u for SSL=%p in ssl_st_fd map", fd, ssl);
-        } else {
-            DEBUG_PRINT("[LAYER2] FAILED: No FD found for SSL=%p in ssl_st_fd map", ssl);
-        }
+        DEBUG_PRINT("[LAYER2] BIO_fd=0, will include SSL pointer in TLS event for user-space mapping");
+        // fd保持为0，用户态将通过SSL指针查询映射
     }
     
     DEBUG_PRINT("openssl uprobe/SSL_write final fd: %d, version: %d", fd, ssl_version);
@@ -175,6 +155,7 @@ int probe_entry_ssl_write(struct pt_regs *ctx) {
     active_ssl_buf_t.fd = fd;
     active_ssl_buf_t.version = ssl_version;
     active_ssl_buf_t.buf = buf;
+    active_ssl_buf_t.ssl_ptr = (u64)ssl;
 
     bpf_map_update_elem(&ssl_write_args, &current_pid_tgid, &active_ssl_buf_t, BPF_ANY);
 
@@ -201,7 +182,8 @@ int probe_return_ssl_write(struct pt_regs *ctx) {
         struct ssl_data_args args = {
             .type = kSSLWrite,
             .fd = active_ssl_buf_t->fd,
-            .version = active_ssl_buf_t->version
+            .version = active_ssl_buf_t->version,
+            .ssl_ptr = active_ssl_buf_t->ssl_ptr
         };
         args.buf = active_ssl_buf_t->buf;
         process_SSL_data(ctx, current_pid_tgid, &args);
@@ -255,16 +237,11 @@ int probe_entry_ssl_read(struct pt_regs *ctx) {
     u32 fd = (u32)ssl_rbio_num_addr;
     DEBUG_PRINT("[LAYER2] SSL_read: SSL=%p, BIO_fd=%u", ssl, fd);
     
+    // 移除内核态映射查询逻辑，改为在TLS事件中包含SSL指针
+    // 用户态将通过事件分发器查询映射关系
     if (fd == 0) {
-        u64 ssl_addr = (u64)ssl;
-        DEBUG_PRINT("[LAYER2] BIO_fd=0, looking up ssl_st_fd map for SSL=%p", ssl);
-        u64 *fd_ptr = bpf_map_lookup_elem(&ssl_st_fd, &ssl_addr);
-        if (fd_ptr) {
-            fd = (u64)*fd_ptr;
-            DEBUG_PRINT("[LAYER2] SUCCESS: Found FD=%u for SSL=%p in ssl_st_fd map", fd, ssl);
-        } else {
-            DEBUG_PRINT("[LAYER2] FAILED: No FD found for SSL=%p in ssl_st_fd map", ssl);
-        }
+        DEBUG_PRINT("[LAYER2] BIO_fd=0, will include SSL pointer in TLS event for user-space mapping");
+        // fd保持为0，用户态将通过SSL指针查询映射
     }
     
     DEBUG_PRINT("openssl uprobe/SSL_read final fd: %d, version: %d", fd, ssl_version);
@@ -279,6 +256,7 @@ int probe_entry_ssl_read(struct pt_regs *ctx) {
     active_ssl_buf_t.fd = fd;
     active_ssl_buf_t.version = ssl_version;
     active_ssl_buf_t.buf = buf;
+    active_ssl_buf_t.ssl_ptr = (u64)ssl;
 
     bpf_map_update_elem(&ssl_read_args, &current_pid_tgid, &active_ssl_buf_t, BPF_ANY);
     
@@ -310,7 +288,8 @@ int probe_return_ssl_read(struct pt_regs *ctx) {
         struct ssl_data_args args = {
             .type = kSSLRead,
             .fd = active_ssl_buf_t->fd,
-            .version = active_ssl_buf_t->version
+            .version = active_ssl_buf_t->version,
+            .ssl_ptr = active_ssl_buf_t->ssl_ptr
         };
         args.buf = active_ssl_buf_t->buf;
         process_SSL_data(ctx, current_pid_tgid, &args);
@@ -326,14 +305,25 @@ SEC("uprobe/SSL_set_fd")
 int probe_SSL_set_fd(struct pt_regs* ctx) {
     u64 ssl_addr = (u64)PT_REGS_PARM1(ctx);
     u64 fd = (u64)PT_REGS_PARM2(ctx);
+    u64 pid_tgid = bpf_get_current_pid_tgid();
+    u32 pid = pid_tgid >> 32;
+    u32 tid = (u32)pid_tgid;
     
-    DEBUG_PRINT("[LAYER1] SSL_set_fd called: SSL=%p, FD=%u, PID=%u", (void*)ssl_addr, (u32)fd, (u32)(bpf_get_current_pid_tgid() >> 32));
+    DEBUG_PRINT("[LAYER1] SSL_set_fd called: SSL=%p, FD=%u, PID=%u", (void*)ssl_addr, (u32)fd, pid);
     
-    int ret = bpf_map_update_elem(&ssl_st_fd, &ssl_addr, &fd, BPF_ANY);
-    if (ret == 0) {
-        DEBUG_PRINT("[LAYER1] SUCCESS: SSL->FD mapping stored: SSL=%p -> FD=%u", (void*)ssl_addr, (u32)fd);
+    // 发送SSL设置FD事件到用户态（移除内核态映射逻辑）
+    struct ssl_set_fd_event *event = bpf_ringbuf_reserve(&ssl_set_fd_events, sizeof(struct ssl_set_fd_event), 0);
+    if (event) {
+        event->timestamp_ns = bpf_ktime_get_ns();
+        event->pid = pid;
+        event->tid = tid;
+        event->ssl_ptr = ssl_addr;
+        event->fd = (u32)fd;
+        
+        bpf_ringbuf_submit(event, 0);
+        DEBUG_PRINT("[LAYER1] SSL set FD event sent: PID=%u, FD=%u", pid, (u32)fd);
     } else {
-        DEBUG_PRINT("[LAYER1] FAILED: Could not store SSL->FD mapping, ret=%d", ret);
+        DEBUG_PRINT("[LAYER1] Failed to reserve ringbuf for SSL set FD event");
     }
     
     return 0;

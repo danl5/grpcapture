@@ -14,7 +14,7 @@ int probe_entry_gnutls_record_send(struct pt_regs *ctx) {
     }
     
     // GnuTLS session pointer
-    void *session = (void *)PT_REGS_PARM1(ctx);
+    void *session __attribute__((unused)) = (void *)PT_REGS_PARM1(ctx);
     
     DEBUG_PRINT("DEBUG: gnutls_record_send - session=%p", session);
     
@@ -23,8 +23,7 @@ int probe_entry_gnutls_record_send(struct pt_regs *ctx) {
     bpf_map_update_elem(&ssl_operation_flag, &pid_tgid, &flag, BPF_ANY);
     
     // 存储GnuTLS session指针
-    __u64 session_ptr = (__u64)session;
-    bpf_map_update_elem(&current_ssl_ptr, &pid_tgid, &session_ptr, BPF_ANY);
+    // current_ssl_ptr映射已移除，功能移至用户态
     
 
     
@@ -41,15 +40,14 @@ int probe_entry_gnutls_record_recv(struct pt_regs *ctx) {
         return 0;
     }
     
-    void *session = (void *)PT_REGS_PARM1(ctx);
+    void *session __attribute__((unused)) = (void *)PT_REGS_PARM1(ctx);
     
     DEBUG_PRINT("DEBUG: gnutls_record_recv - session=%p", session);
     
     __u8 flag = 1;
     bpf_map_update_elem(&ssl_operation_flag, &pid_tgid, &flag, BPF_ANY);
     
-    __u64 session_ptr = (__u64)session;
-    bpf_map_update_elem(&current_ssl_ptr, &pid_tgid, &session_ptr, BPF_ANY);
+    // current_ssl_ptr映射已移除，功能移至用户态
     
 
     
@@ -66,15 +64,14 @@ int probe_gnutls_handshake(struct pt_regs *ctx) {
         return 0;
     }
     
-    void *session = (void *)PT_REGS_PARM1(ctx);
+    void *session __attribute__((unused)) = (void *)PT_REGS_PARM1(ctx);
     
     DEBUG_PRINT("DEBUG: gnutls_handshake - session=%p", session);
     
     __u8 flag = 1;
     bpf_map_update_elem(&ssl_operation_flag, &pid_tgid, &flag, BPF_ANY);
     
-    __u64 session_ptr = (__u64)session;
-    bpf_map_update_elem(&current_ssl_ptr, &pid_tgid, &session_ptr, BPF_ANY);
+    // current_ssl_ptr映射已移除，功能移至用户态
 
     
     return 0;
@@ -90,21 +87,13 @@ int probe_gnutls_bye(struct pt_regs *ctx) {
         return 0;
     }
     
-    void *session = (void *)PT_REGS_PARM1(ctx);
+    void *session __attribute__((unused)) = (void *)PT_REGS_PARM1(ctx);
     
     DEBUG_PRINT("DEBUG: gnutls_bye - session=%p", session);
     
     // 清理相关的映射条目
-    __u64 session_ptr = (__u64)session;
-    struct ssl_conn_key key = {
-        .pid_tgid = pid_tgid,
-        .ssl_ptr = session_ptr
-    };
-    
-    bpf_map_delete_elem(&sock_storage, &key);
     bpf_map_delete_elem(&ssl_operation_flag, &pid_tgid);
-    bpf_map_delete_elem(&current_ssl_ptr, &pid_tgid);
-    bpf_map_delete_elem(&active_ssl_sockets, &pid_tgid);
+    // sock_storage, current_ssl_ptr, active_ssl_sockets映射已移除
     
     return 0;
 }
